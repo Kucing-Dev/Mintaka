@@ -1,6 +1,6 @@
 [package]
-name = "rustbin-analyzer"
-version = "0.2.0"
+name = "mintaka"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -13,3 +13,4 @@ anyhow = "1"
 sha2 = "0.10"
 hex = "0.4"
 colored = "2"
+chrono = "0.4"

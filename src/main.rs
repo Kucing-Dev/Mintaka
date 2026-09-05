@@ -129,7 +129,6 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
             section_count = pe.sections.len();
             let mut max_end = 0usize;
 
-            // Section Analysis
             for section in &pe.sections {
                 let name = String::from_utf8_lossy(&section.name)
                     .trim_end_matches('\0')
@@ -143,18 +142,10 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 let executable = chars & 0x20000000 != 0;
 
                 let mut char_str = String::new();
-                if readable {
-                    char_str.push('R');
-                }
-                if writable {
-                    char_str.push('W');
-                }
-                if executable {
-                    char_str.push('X');
-                }
-                if char_str.is_empty() {
-                    char_str.push('-');
-                }
+                if readable { char_str.push('R'); }
+                if writable { char_str.push('W'); }
+                if executable { char_str.push('X'); }
+                if char_str.is_empty() { char_str.push('-'); }
 
                 let mut entropy = 0.0;
                 if offset + size <= data.len() && size > 0 {
@@ -163,10 +154,7 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
 
                 let suspicious = writable && executable;
                 if suspicious {
-                    indicators.push(format!(
-                        "Suspicious section: {} (Writable + Executable)",
-                        name
-                    ));
+                    indicators.push(format!("Suspicious section: {} (Writable + Executable)", name));
                 }
 
                 sections_info.push(SectionInfo {
@@ -187,7 +175,7 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 overlay_size = Some(data.len() - max_end);
             }
 
-            // Import Table Analysis
+            // Import analysis
             for import in &pe.imports {
                 let dll = import.dll.to_lowercase();
                 let api_name = import.name.as_ref();
@@ -233,12 +221,12 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         _ => ("Unknown".to_string(), None),
     };
 
-    // Strings & Rust Detection
+    // Strings & Rust detection
     let strings = extract_strings(data, 5);
     let is_rust = detect_rust(&strings, data);
     let (rustc_version, rustc_commit_hash) = extract_rustc_info(&strings);
 
-    // ===== Better Packer / Compiler Detection =====
+    // Better Packer / Compiler Detection
     let packer_hint = detect_packer_and_compiler(&sections_info, &strings, is_rust);
 
     // Dependencies
@@ -277,23 +265,15 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         }
         if sec.entropy >= 7.0 {
             score += 10;
-            indicators.push(format!(
-                "High entropy section: {} ({:.2})",
-                sec.name, sec.entropy
-            ));
+            indicators.push(format!("High entropy section: {} ({:.2})", sec.name, sec.entropy));
         } else if sec.entropy >= 6.5 {
             score += 5;
         }
     }
 
-    // Packer scoring
     if let Some(ref p) = packer_hint {
-        if p.contains("UPX")
-            || p.contains("VMProtect")
-            || p.contains("Themida")
-            || p.contains("ASPack")
-            || p.contains("PECompact")
-        {
+        if p.contains("UPX") || p.contains("VMProtect") || p.contains("Themida") 
+            || p.contains("ASPack") || p.contains("PECompact") {
             score += 18;
         } else if p.contains("Possibly Packed") {
             score += 10;
@@ -374,7 +354,6 @@ fn detect_packer_and_compiler(
 ) -> Option<String> {
     let mut findings: Vec<String> = Vec::new();
 
-    // Section name based
     for sec in sections {
         let name = sec.name.to_lowercase();
 
@@ -413,7 +392,6 @@ fn detect_packer_and_compiler(
         }
     }
 
-    // String based detection
     for s in strings {
         let lower = s.to_lowercase();
 
@@ -435,13 +413,11 @@ fn detect_packer_and_compiler(
         findings.push("Rust".to_string());
     }
 
-    // Fallback high entropy
     let high_entropy = sections.iter().any(|s| s.entropy >= 7.2);
     if high_entropy && findings.is_empty() {
         findings.push("Possibly Packed (High Entropy)".to_string());
     }
 
-    // Unique
     let mut unique = Vec::new();
     for f in findings {
         if !unique.contains(&f) {
@@ -500,15 +476,8 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<String> {
 
 fn detect_rust(strings: &[String], data: &[u8]) -> bool {
     let keys = [
-        "rustc version",
-        "rust_begin_unwind",
-        "core::panicking",
-        "std::sys",
-        "alloc::",
-        "rust_eh_personality",
-        ".cargo/registry",
-        "rustc-stable",
-        "rustc-nightly",
+        "rustc version", "rust_begin_unwind", "core::panicking", "std::sys",
+        "alloc::", "rust_eh_personality", ".cargo/registry", "rustc-stable", "rustc-nightly",
     ];
     for s in strings {
         for k in &keys {
@@ -543,15 +512,13 @@ fn extract_rustc_info(strings: &[String]) -> (Option<String>, Option<String>) {
 
 fn extract_dependencies_from_paths(strings: &[String]) -> HashSet<CrateInfo> {
     let mut deps = HashSet::new();
-    let re = Regex::new(r"[\\/]([a-zA-Z][a-zA-Z0-9_-]{1,64})-(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)")
-        .unwrap();
+    let re = Regex::new(r"[\\/]([a-zA-Z][a-zA-Z0-9_-]{1,64})-(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)").unwrap();
 
     for s in strings {
         if s.contains(".cargo") || s.contains("registry") {
             for caps in re.captures_iter(s) {
                 let name = caps[1].to_string();
-                if name.len() > 2 && !["src", "registry", "github", "crates"].contains(&name.as_str())
-                {
+                if name.len() > 2 && !["src", "registry", "github", "crates"].contains(&name.as_str()) {
                     deps.insert(CrateInfo {
                         name,
                         version: Some(caps[2].to_string()),
@@ -584,15 +551,9 @@ fn extract_iocs(strings: &[String]) -> Vec<String> {
     let mut iocs = Vec::new();
     let mut seen = HashSet::new();
 
-    let ip_re = Regex::new(
-        r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b",
-    )
-    .unwrap();
+    let ip_re = Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
     let url_re = Regex::new(r#"https?://[^\s"'<>]+"#).unwrap();
-    let domain_re = Regex::new(
-        r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|ru|cn|xyz|top|info|biz|online)\b",
-    )
-    .unwrap();
+    let domain_re = Regex::new(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|ru|cn|xyz|top|info|biz|online)\b").unwrap();
 
     for s in strings {
         if let Some(m) = ip_re.find(s) {
@@ -642,21 +603,8 @@ fn print_report(report: &AnalysisReport) {
     let width = 66;
 
     println!("{}", "═".repeat(width).bright_cyan());
-    println!(
-        "{}",
-        format!("{:^width$}", "MINTAKA v0.5", width = width)
-            .bright_cyan()
-            .bold()
-    );
-    println!(
-        "{}",
-        format!(
-            "{:^width$}",
-            "Static Analysis & Triage for Rust Binaries",
-            width = width
-        )
-        .cyan()
-    );
+    println!("{}", format!("{:^width$}", "MINTAKA v0.5", width = width).bright_cyan().bold());
+    println!("{}", format!("{:^width$}", "Static Analysis & Triage for Rust Binaries", width = width).cyan());
     println!("{}", "═".repeat(width).bright_cyan());
     println!();
 
@@ -738,20 +686,15 @@ fn print_report(report: &AnalysisReport) {
 
     if !report.sections.is_empty() {
         println!("{}", "Sections".bold().white());
-        println!(
-            "  {:<12} {:>10} {:>8} {:>6}  {}",
-            "Name", "Size", "Entropy", "Flags", "Note"
-        );
+        println!("  {:<12} {:>10} {:>8} {:>6}  {}", "Name", "Size", "Entropy", "Flags", "Note");
         for sec in &report.sections {
             let note = if sec.suspicious {
                 "← Suspicious".red().to_string()
             } else {
                 "".to_string()
             };
-            println!(
-                "  {:<12} {:>10} {:>8.2} {:>6}  {}",
-                sec.name, sec.size, sec.entropy, sec.characteristics, note
-            );
+            println!("  {:<12} {:>10} {:>8.2} {:>6}  {}", 
+                sec.name, sec.size, sec.entropy, sec.characteristics, note);
         }
         println!();
     }

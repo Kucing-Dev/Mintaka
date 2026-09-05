@@ -6,7 +6,7 @@ use goblin::Object;
 use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -190,19 +190,15 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
             // ===== Import Table Analysis =====
             for import in &pe.imports {
                 let dll = import.dll.to_lowercase();
-                for api in &import.imports {
-                    // goblin uses different structure depending on version
-                    // We try to get the name safely
-                    let api_name = match &api.name {
-                        Some(n) => n.to_string(),
-                        None => continue,
-                    };
+                
+                // LANGSUNG ambil nama API dari `import.name` (tidak perlu nested loop lagi)
+                let api_name = import.name.as_ref(); 
 
-                    if dangerous_apis.contains(api_name.as_str()) {
-                        let entry = format!("{}!{}", dll, api_name);
-                        suspicious_imports.push(entry.clone());
-                        indicators.push(format!("Suspicious import: {}", entry));
-                    }
+                if dangerous_apis.contains(api_name) {
+                    let entry = format!("{}!{}", dll, api_name);
+                    suspicious_imports.push(entry.clone());
+                    indicators.push(format!("Suspicious import: {}", entry));
+                
                 }
             }
 
@@ -481,7 +477,7 @@ fn extract_iocs(strings: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
 
     let ip_re = Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
-    let url_re = Regex::new(r"https?://[^\s\"'<>]+").unwrap();
+    let url_re = Regex::new(r#"https?://[^\s\"'<>]+"#).unwrap();
     let domain_re = Regex::new(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|ru|cn|xyz|top|info|biz|online)\b").unwrap();
 
     for s in strings {
@@ -494,7 +490,7 @@ fn extract_iocs(strings: &[String]) -> Vec<String> {
         if let Some(m) = url_re.find(s) {
             let url = m.as_str().to_string();
             if seen.insert(url.clone()) {
-                iocs.push(format!("URL: {}", truncate(&url, 70));
+                iocs.push(format!("URL: {}", truncate(&url, 70)));
             }
         }
         if let Some(m) = domain_re.find(s) {

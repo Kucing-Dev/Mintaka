@@ -6,7 +6,7 @@ use goblin::Object;
 use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -42,6 +42,19 @@ struct AnalysisReport {
     entry_point: Option<String>,
     packer_hint: Option<String>,
     overlay_size: Option<usize>,
+    // Phase 1 new fields
+    suspicious_imports: Vec<String>,
+    sections: Vec<SectionInfo>,
+    iocs: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct SectionInfo {
+    name: String,
+    size: usize,
+    entropy: f64,
+    characteristics: String,
+    suspicious: bool,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq, Hash)]
@@ -76,7 +89,22 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
     let mut entry_point = None;
     let mut packer_hint = None;
     let mut overlay_size = None;
-    let mut sections_info: Vec<(String, usize, f64)> = Vec::new();
+    let mut sections_info: Vec<SectionInfo> = Vec::new();
+    let mut suspicious_imports: Vec<String> = Vec::new();
+
+    // Dangerous APIs
+    let dangerous_apis: HashSet<&str> = [
+        "VirtualAlloc", "VirtualAllocEx", "VirtualProtect", "VirtualProtectEx",
+        "WriteProcessMemory", "ReadProcessMemory", "CreateRemoteThread",
+        "NtCreateThreadEx", "RtlCreateUserThread", "WinExec", "ShellExecuteA",
+        "ShellExecuteW", "CreateProcessA", "CreateProcessW", "URLDownloadToFileA",
+        "URLDownloadToFileW", "socket", "connect", "send", "recv", "WSAStartup",
+        "InternetOpenA", "InternetOpenUrlA", "HttpSendRequestA", "IsDebuggerPresent",
+        "CheckRemoteDebuggerPresent", "OutputDebugStringA", "GetProcAddress",
+        "LoadLibraryA", "LoadLibraryW", "GetModuleHandleA", "OpenProcess",
+        "TerminateProcess", "CreateToolhelp32Snapshot", "Process32First",
+        "SetWindowsHookExA", "SetWindowsHookExW", "RegSetValueExA", "RegSetValueExW",
+    ].iter().cloned().collect();
 
     let (format, architecture) = match Object::parse(data)? {
         Object::PE(pe) => {
@@ -87,6 +115,7 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 _ => None,
             };
 
+            // Timestamp
             let ts = pe.header.coff_header.time_date_stamp;
             if ts > 0 {
                 if let Some(dt) = Utc.timestamp_opt(ts as i64, 0).single() {
@@ -94,6 +123,7 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 }
             }
 
+            // Entry point
             if let Some(opt) = pe.header.optional_header {
                 entry_point = Some(format!("0x{:08X}", opt.standard_fields.address_of_entry_point));
             }
@@ -101,23 +131,50 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
             section_count = pe.sections.len();
             let mut max_end = 0usize;
 
+            // ===== Section Analysis =====
             for section in &pe.sections {
                 let name = String::from_utf8_lossy(&section.name)
                     .trim_end_matches('\0')
                     .to_string();
                 let offset = section.pointer_to_raw_data as usize;
                 let size = section.size_of_raw_data as usize;
+                let chars = section.characteristics;
 
+                let readable = chars & 0x40000000 != 0;
+                let writable = chars & 0x80000000 != 0;
+                let executable = chars & 0x20000000 != 0;
+
+                let mut char_str = String::new();
+                if readable { char_str.push('R'); }
+                if writable { char_str.push('W'); }
+                if executable { char_str.push('X'); }
+                if char_str.is_empty() { char_str.push('-'); }
+
+                let mut entropy = 0.0;
                 if offset + size <= data.len() && size > 0 {
-                    let entropy = calculate_entropy(&data[offset..offset + size]);
-                    sections_info.push((name.clone(), size, entropy));
+                    entropy = calculate_entropy(&data[offset..offset + size]);
                 }
+
+                let suspicious = writable && executable;
+
+                if suspicious {
+                    indicators.push(format!("Suspicious section: {} (Writable + Executable)", name));
+                }
+
+                sections_info.push(SectionInfo {
+                    name: name.clone(),
+                    size,
+                    entropy,
+                    characteristics: char_str,
+                    suspicious,
+                });
 
                 let end = offset + size;
                 if end > max_end {
                     max_end = end;
                 }
 
+                // Packer detection
                 let lname = name.to_lowercase();
                 if lname.contains("upx") {
                     packer_hint = Some("UPX".to_string());
@@ -128,6 +185,25 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
 
             if max_end > 0 && data.len() > max_end + 64 {
                 overlay_size = Some(data.len() - max_end);
+            }
+
+            // ===== Import Table Analysis =====
+            for import in &pe.imports {
+                let dll = import.dll.to_lowercase();
+                for api in &import.imports {
+                    // goblin uses different structure depending on version
+                    // We try to get the name safely
+                    let api_name = match &api.name {
+                        Some(n) => n.to_string(),
+                        None => continue,
+                    };
+
+                    if dangerous_apis.contains(api_name.as_str()) {
+                        let entry = format!("{}!{}", dll, api_name);
+                        suspicious_imports.push(entry.clone());
+                        indicators.push(format!("Suspicious import: {}", entry));
+                    }
+                }
             }
 
             ("PE".to_string(), arch)
@@ -149,7 +225,13 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                     let size = section.sh_size as usize;
                     if offset + size <= data.len() && size > 64 {
                         let entropy = calculate_entropy(&data[offset..offset + size]);
-                        sections_info.push((name.to_string(), size, entropy));
+                        sections_info.push(SectionInfo {
+                            name: name.to_string(),
+                            size,
+                            entropy,
+                            characteristics: "-".to_string(),
+                            suspicious: false,
+                        });
                     }
                 }
             }
@@ -159,10 +241,12 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         _ => ("Unknown".to_string(), None),
     };
 
+    // ===== Strings & Rust Detection =====
     let strings = extract_strings(data, 5);
     let is_rust = detect_rust(&strings, data);
     let (rustc_version, rustc_commit_hash) = extract_rustc_info(&strings);
 
+    // Dependencies
     let mut deps = extract_dependencies_from_paths(&strings);
     for d in extract_from_panic_messages(&strings) {
         deps.insert(d);
@@ -170,14 +254,22 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
     let mut dependencies: Vec<CrateInfo> = deps.into_iter().collect();
     dependencies.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // ===== IOC Extraction =====
+    let iocs = extract_iocs(&strings);
+
     // ====================== RISK SCORING ======================
     let mut score: u32 = 0;
 
     if is_rust {
-        score += 40;
+        score += 35;
         indicators.push("Compiled with Rust".to_string());
     }
 
+    // Suspicious imports
+    let import_score = (suspicious_imports.len() as u32 * 6).min(30);
+    score += import_score;
+
+    // File entropy
     if file_entropy >= 7.2 {
         score += 12;
         indicators.push(format!("Very high file entropy ({:.2})", file_entropy));
@@ -186,13 +278,16 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         indicators.push(format!("High file entropy ({:.2})", file_entropy));
     }
 
-    for (name, _, entropy) in &sections_info {
-        if *entropy >= 7.0 {
-            score += 12;
-            indicators.push(format!("High entropy section: {} ({:.2})", name, entropy));
-        } else if *entropy >= 6.5 {
-            score += 6;
-            indicators.push(format!("Elevated entropy section: {} ({:.2})", name, entropy));
+    // Section entropy + suspicious flags
+    for sec in &sections_info {
+        if sec.suspicious {
+            score += 15;
+        }
+        if sec.entropy >= 7.0 {
+            score += 10;
+            indicators.push(format!("High entropy section: {} ({:.2})", sec.name, sec.entropy));
+        } else if sec.entropy >= 6.5 {
+            score += 5;
         }
     }
 
@@ -211,16 +306,10 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         }
     }
 
-    let sus = find_suspicious_strings(&strings);
-    if !sus.is_empty() {
-        let add = (sus.len() as u32 * 3).min(18);
+    // IOCs
+    if !iocs.is_empty() {
+        let add = (iocs.len() as u32 * 2).min(16);
         score += add;
-        for s in sus.iter().take(5) {
-            indicators.push(format!("Suspicious string: {}", truncate(s, 55)));
-        }
-        if sus.len() > 5 {
-            indicators.push(format!("... +{} more suspicious strings", sus.len() - 5));
-        }
     }
 
     if is_rust && rustc_version.is_none() {
@@ -228,17 +317,13 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         indicators.push("No rustc version recovered (possibly stripped)".to_string());
     }
 
-    if is_rust && dependencies.is_empty() {
-        score += 5;
-    }
-
     if score > 100 {
         score = 100;
     }
 
-    let risk_level = if score >= 70 {
+    let risk_level = if score >= 75 {
         "HIGH RISK".to_string()
-    } else if score >= 40 {
+    } else if score >= 45 {
         "NEEDS REVIEW".to_string()
     } else {
         "LOW".to_string()
@@ -246,9 +331,6 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
 
     if !is_rust {
         notes.push("This does not appear to be a Rust binary".to_string());
-    }
-    if data.len() < 50_000 && is_rust {
-        notes.push("Unusually small for a typical Rust binary (static linking)".to_string());
     }
 
     Ok(AnalysisReport {
@@ -271,6 +353,9 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         entry_point,
         packer_hint,
         overlay_size,
+        suspicious_imports,
+        sections: sections_info,
+        iocs,
     })
 }
 
@@ -320,15 +405,8 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<String> {
 
 fn detect_rust(strings: &[String], data: &[u8]) -> bool {
     let keys = [
-        "rustc version",
-        "rust_begin_unwind",
-        "core::panicking",
-        "std::sys",
-        "alloc::",
-        "rust_eh_personality",
-        ".cargo/registry",
-        "rustc-stable",
-        "rustc-nightly",
+        "rustc version", "rust_begin_unwind", "core::panicking", "std::sys",
+        "alloc::", "rust_eh_personality", ".cargo/registry", "rustc-stable", "rustc-nightly",
     ];
     for s in strings {
         for k in &keys {
@@ -398,39 +476,48 @@ fn extract_from_panic_messages(strings: &[String]) -> HashSet<CrateInfo> {
     deps
 }
 
-fn find_suspicious_strings(strings: &[String]) -> Vec<String> {
-    let mut found = Vec::new();
-    let ip_re = Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap();
-    let url_re = Regex::new(r"https?://[^\s\"']+").unwrap();
+fn extract_iocs(strings: &[String]) -> Vec<String> {
+    let mut iocs = Vec::new();
+    let mut seen = HashSet::new();
 
-    let keywords = [
-        "cmd.exe", "powershell", "CreateRemoteThread", "VirtualAlloc", "WriteProcessMemory",
-        "mutex", "HKEY_", "AppData", "Temp\\", "bitcoin", "wallet", "ransom", "encrypt",
-        "discord.com", "telegram", "pastebin", "tor2web",
-    ];
+    let ip_re = Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
+    let url_re = Regex::new(r"https?://[^\s\"'<>]+").unwrap();
+    let domain_re = Regex::new(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|ru|cn|xyz|top|info|biz|online)\b").unwrap();
 
     for s in strings {
+        if let Some(m) = ip_re.find(s) {
+            let ip = m.as_str().to_string();
+            if !ip.starts_with("127.") && !ip.starts_with("0.") && seen.insert(ip.clone()) {
+                iocs.push(format!("IP: {}", ip));
+            }
+        }
+        if let Some(m) = url_re.find(s) {
+            let url = m.as_str().to_string();
+            if seen.insert(url.clone()) {
+                iocs.push(format!("URL: {}", truncate(&url, 70));
+            }
+        }
+        if let Some(m) = domain_re.find(s) {
+            let domain = m.as_str().to_string();
+            if seen.insert(domain.clone()) {
+                iocs.push(format!("Domain: {}", domain));
+            }
+        }
+
         let lower = s.to_lowercase();
-        if ip_re.is_match(s) && !s.starts_with("127.") && !s.starts_with("0.") {
-            found.push(s.clone());
-        } else if url_re.is_match(s) {
-            found.push(s.clone());
-        } else {
-            for kw in &keywords {
-                if lower.contains(&kw.to_lowercase()) {
-                    found.push(s.clone());
-                    break;
-                }
+        if lower.contains("hkey_") || lower.contains("software\\") {
+            if seen.insert(s.clone()) {
+                iocs.push(format!("Registry: {}", truncate(s, 60)));
+            }
+        }
+        if lower.contains("appdata") || lower.contains("\\temp\\") || lower.contains("\\users\\") {
+            if seen.insert(s.clone()) {
+                iocs.push(format!("Path: {}", truncate(s, 60)));
             }
         }
     }
 
-    let mut unique = HashSet::new();
-    found
-        .into_iter()
-        .filter(|s| unique.insert(s.clone()))
-        .take(12)
-        .collect()
+    iocs.into_iter().take(15).collect()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -442,11 +529,11 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn print_report(report: &AnalysisReport) {
-    let width = 64;
+    let width = 66;
 
     // Header
     println!("{}", "═".repeat(width).bright_cyan());
-    println!("{}", format!("{:^width$}", "MINTAKA v0.3", width = width).bright_cyan().bold());
+    println!("{}", format!("{:^width$}", "MINTAKA v0.4", width = width).bright_cyan().bold());
     println!("{}", format!("{:^width$}", "Static Analysis & Triage for Rust Binaries", width = width).cyan());
     println!("{}", "═".repeat(width).bright_cyan());
     println!();
@@ -456,13 +543,11 @@ fn print_report(report: &AnalysisReport) {
     println!("{}  {} bytes", "Size".bold().white(), report.file_size);
     println!("{}  {}", "SHA256".bold().white(), report.sha256);
     println!("{}  {}", "Format".bold().white(), report.format);
-
     if let Some(arch) = &report.architecture {
         println!("{}  {}", "Architecture".bold().white(), arch);
     }
     println!("{}  {:.2}", "File Entropy".bold().white(), report.file_entropy);
     println!("{}  {}", "Sections".bold().white(), report.section_count);
-
     if let Some(ts) = &report.compile_timestamp {
         println!("{}  {}", "Compiled".bold().white(), ts);
     }
@@ -475,7 +560,6 @@ fn print_report(report: &AnalysisReport) {
     if let Some(ov) = report.overlay_size {
         println!("{}  {} bytes", "Overlay".bold().white(), ov);
     }
-
     println!();
 
     // Triage Box
@@ -487,25 +571,24 @@ fn print_report(report: &AnalysisReport) {
 
     match color {
         "red" => {
-            println!("{}", "┌──────────────────────────────────────────────────────────────┐".red());
-            println!("{}  Status      : {:<47}{}", "│".red(), status_display, "│".red());
-            println!("{}  Risk Score  : {:>3} / 100{:<39}{}", "│".red(), report.risk_score, "", "│".red());
-            println!("{}", "└──────────────────────────────────────────────────────────────┘".red());
+            println!("{}", "┌────────────────────────────────────────────────────────────────┐".red());
+            println!("{}  Status      : {:<49}{}", "│".red(), status_display, "│".red());
+            println!("{}  Risk Score  : {:>3} / 100{:<41}{}", "│".red(), report.risk_score, "", "│".red());
+            println!("{}", "└────────────────────────────────────────────────────────────────┘".red());
         }
         "yellow" => {
-            println!("{}", "┌──────────────────────────────────────────────────────────────┐".yellow());
-            println!("{}  Status      : {:<47}{}", "│".yellow(), status_display, "│".yellow());
-            println!("{}  Risk Score  : {:>3} / 100{:<39}{}", "│".yellow(), report.risk_score, "", "│".yellow());
-            println!("{}", "└──────────────────────────────────────────────────────────────┘".yellow());
+            println!("{}", "┌────────────────────────────────────────────────────────────────┐".yellow());
+            println!("{}  Status      : {:<49}{}", "│".yellow(), status_display, "│".yellow());
+            println!("{}  Risk Score  : {:>3} / 100{:<41}{}", "│".yellow(), report.risk_score, "", "│".yellow());
+            println!("{}", "└────────────────────────────────────────────────────────────────┘".yellow());
         }
         _ => {
-            println!("{}", "┌──────────────────────────────────────────────────────────────┐".green());
-            println!("{}  Status      : {:<47}{}", "│".green(), status_display, "│".green());
-            println!("{}  Risk Score  : {:>3} / 100{:<39}{}", "│".green(), report.risk_score, "", "│".green());
-            println!("{}", "└──────────────────────────────────────────────────────────────┘".green());
+            println!("{}", "┌────────────────────────────────────────────────────────────────┐".green());
+            println!("{}  Status      : {:<49}{}", "│".green(), status_display, "│".green());
+            println!("{}  Risk Score  : {:>3} / 100{:<41}{}", "│".green(), report.risk_score, "", "│".green());
+            println!("{}", "└────────────────────────────────────────────────────────────────┘".green());
         }
     }
-
     println!();
 
     // Rust Info
@@ -515,38 +598,68 @@ fn print_report(report: &AnalysisReport) {
     } else {
         println!("{}", "NO");
     }
-
     if let Some(v) = &report.rustc_version {
         println!("{}  {}", "rustc".bold().white(), v);
     }
     if let Some(h) = &report.rustc_commit_hash {
         println!("{}  {}", "Commit".bold().white(), h);
     }
-
     println!();
+
+    // Suspicious Imports
+    if !report.suspicious_imports.is_empty() {
+        println!("{}", "Suspicious Imports".bold().red());
+        for imp in report.suspicious_imports.iter().take(12) {
+            println!("  • {}", imp);
+        }
+        if report.suspicious_imports.len() > 12 {
+            println!("  ... and {} more", report.suspicious_imports.len() - 12);
+        }
+        println!();
+    }
+
+    // Sections
+    if !report.sections.is_empty() {
+        println!("{}", "Sections".bold().white());
+        println!("  {:<12} {:>10} {:>8} {:>6}  {}", "Name", "Size", "Entropy", "Flags", "Note");
+        for sec in &report.sections {
+            let note = if sec.suspicious { "← Suspicious".red().to_string() } else { "".to_string() };
+            println!("  {:<12} {:>10} {:>8.2} {:>6}  {}", 
+                sec.name, sec.size, sec.entropy, sec.characteristics, note);
+        }
+        println!();
+    }
+
+    // IOCs
+    if !report.iocs.is_empty() {
+        println!("{}", "Extracted IOCs".bold().yellow());
+        for ioc in &report.iocs {
+            println!("  • {}", ioc);
+        }
+        println!();
+    }
 
     // Dependencies
     println!("{}", "Dependencies".bold().white());
     if report.dependencies.is_empty() {
         println!("  (none recovered)");
     } else {
-        for dep in report.dependencies.iter().take(12) {
+        for dep in report.dependencies.iter().take(10) {
             match &dep.version {
-                Some(v) => println!("  • {:<28} {}", dep.name, v),
+                Some(v) => println!("  • {:<26} {}", dep.name, v),
                 None => println!("  • {}", dep.name),
             }
         }
-        if report.dependencies.len() > 12 {
-            println!("  ... and {} more", report.dependencies.len() - 12);
+        if report.dependencies.len() > 10 {
+            println!("  ... and {} more", report.dependencies.len() - 10);
         }
     }
-
     println!();
 
     // Indicators
     if !report.indicators.is_empty() {
         println!("{}", "Suspicious Indicators".bold().yellow());
-        for ind in &report.indicators {
+        for ind in report.indicators.iter().take(10) {
             println!("  • {}", ind);
         }
         println!();

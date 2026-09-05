@@ -6,7 +6,7 @@ use goblin::Object;
 use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -42,7 +42,6 @@ struct AnalysisReport {
     entry_point: Option<String>,
     packer_hint: Option<String>,
     overlay_size: Option<usize>,
-    // Phase 1 new fields
     suspicious_imports: Vec<String>,
     sections: Vec<SectionInfo>,
     iocs: Vec<String>,
@@ -87,12 +86,10 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
     let mut section_count = 0;
     let mut compile_timestamp = None;
     let mut entry_point = None;
-    let mut packer_hint = None;
     let mut overlay_size = None;
     let mut sections_info: Vec<SectionInfo> = Vec::new();
     let mut suspicious_imports: Vec<String> = Vec::new();
 
-    // Dangerous APIs
     let dangerous_apis: HashSet<&str> = [
         "VirtualAlloc", "VirtualAllocEx", "VirtualProtect", "VirtualProtectEx",
         "WriteProcessMemory", "ReadProcessMemory", "CreateRemoteThread",
@@ -104,7 +101,10 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         "LoadLibraryA", "LoadLibraryW", "GetModuleHandleA", "OpenProcess",
         "TerminateProcess", "CreateToolhelp32Snapshot", "Process32First",
         "SetWindowsHookExA", "SetWindowsHookExW", "RegSetValueExA", "RegSetValueExW",
-    ].iter().cloned().collect();
+    ]
+    .iter()
+    .cloned()
+    .collect();
 
     let (format, architecture) = match Object::parse(data)? {
         Object::PE(pe) => {
@@ -115,7 +115,6 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 _ => None,
             };
 
-            // Timestamp
             let ts = pe.header.coff_header.time_date_stamp;
             if ts > 0 {
                 if let Some(dt) = Utc.timestamp_opt(ts as i64, 0).single() {
@@ -123,7 +122,6 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 }
             }
 
-            // Entry point
             if let Some(opt) = pe.header.optional_header {
                 entry_point = Some(format!("0x{:08X}", opt.standard_fields.address_of_entry_point));
             }
@@ -131,7 +129,7 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
             section_count = pe.sections.len();
             let mut max_end = 0usize;
 
-            // ===== Section Analysis =====
+            // Section Analysis
             for section in &pe.sections {
                 let name = String::from_utf8_lossy(&section.name)
                     .trim_end_matches('\0')
@@ -145,10 +143,18 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 let executable = chars & 0x20000000 != 0;
 
                 let mut char_str = String::new();
-                if readable { char_str.push('R'); }
-                if writable { char_str.push('W'); }
-                if executable { char_str.push('X'); }
-                if char_str.is_empty() { char_str.push('-'); }
+                if readable {
+                    char_str.push('R');
+                }
+                if writable {
+                    char_str.push('W');
+                }
+                if executable {
+                    char_str.push('X');
+                }
+                if char_str.is_empty() {
+                    char_str.push('-');
+                }
 
                 let mut entropy = 0.0;
                 if offset + size <= data.len() && size > 0 {
@@ -156,9 +162,11 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 }
 
                 let suspicious = writable && executable;
-
                 if suspicious {
-                    indicators.push(format!("Suspicious section: {} (Writable + Executable)", name));
+                    indicators.push(format!(
+                        "Suspicious section: {} (Writable + Executable)",
+                        name
+                    ));
                 }
 
                 sections_info.push(SectionInfo {
@@ -173,36 +181,20 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 if end > max_end {
                     max_end = end;
                 }
-
-                // Packer detection
-                let lname = name.to_lowercase();
-                if lname.contains("upx") {
-                    packer_hint = Some("UPX".to_string());
-                } else if lname.contains("vmp") || lname.contains("themida") {
-                    packer_hint = Some("Protector (VMProtect/Themida-like)".to_string());
-                }
             }
 
             if max_end > 0 && data.len() > max_end + 64 {
                 overlay_size = Some(data.len() - max_end);
             }
 
-            // ===== Import Table Analysis =====
+            // Import Table Analysis
             for import in &pe.imports {
                 let dll = import.dll.to_lowercase();
-                for api in &import.imports {
-                    // goblin uses different structure depending on version
-                    // We try to get the name safely
-                    let api_name = match &api.name {
-                        Some(n) => n.to_string(),
-                        None => continue,
-                    };
-
-                    if dangerous_apis.contains(api_name.as_str()) {
-                        let entry = format!("{}!{}", dll, api_name);
-                        suspicious_imports.push(entry.clone());
-                        indicators.push(format!("Suspicious import: {}", entry));
-                    }
+                let api_name = import.name.as_ref();
+                if dangerous_apis.contains(api_name) {
+                    let entry = format!("{}!{}", dll, api_name);
+                    suspicious_imports.push(entry.clone());
+                    indicators.push(format!("Suspicious import: {}", entry));
                 }
             }
 
@@ -241,10 +233,13 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         _ => ("Unknown".to_string(), None),
     };
 
-    // ===== Strings & Rust Detection =====
+    // Strings & Rust Detection
     let strings = extract_strings(data, 5);
     let is_rust = detect_rust(&strings, data);
     let (rustc_version, rustc_commit_hash) = extract_rustc_info(&strings);
+
+    // ===== Better Packer / Compiler Detection =====
+    let packer_hint = detect_packer_and_compiler(&sections_info, &strings, is_rust);
 
     // Dependencies
     let mut deps = extract_dependencies_from_paths(&strings);
@@ -254,7 +249,7 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
     let mut dependencies: Vec<CrateInfo> = deps.into_iter().collect();
     dependencies.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // ===== IOC Extraction =====
+    // IOC Extraction
     let iocs = extract_iocs(&strings);
 
     // ====================== RISK SCORING ======================
@@ -265,11 +260,9 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         indicators.push("Compiled with Rust".to_string());
     }
 
-    // Suspicious imports
     let import_score = (suspicious_imports.len() as u32 * 6).min(30);
     score += import_score;
 
-    // File entropy
     if file_entropy >= 7.2 {
         score += 12;
         indicators.push(format!("Very high file entropy ({:.2})", file_entropy));
@@ -278,22 +271,36 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         indicators.push(format!("High file entropy ({:.2})", file_entropy));
     }
 
-    // Section entropy + suspicious flags
     for sec in &sections_info {
         if sec.suspicious {
             score += 15;
         }
         if sec.entropy >= 7.0 {
             score += 10;
-            indicators.push(format!("High entropy section: {} ({:.2})", sec.name, sec.entropy));
+            indicators.push(format!(
+                "High entropy section: {} ({:.2})",
+                sec.name, sec.entropy
+            ));
         } else if sec.entropy >= 6.5 {
             score += 5;
         }
     }
 
+    // Packer scoring
     if let Some(ref p) = packer_hint {
-        score += 15;
-        indicators.push(format!("Possible packer/protector: {}", p));
+        if p.contains("UPX")
+            || p.contains("VMProtect")
+            || p.contains("Themida")
+            || p.contains("ASPack")
+            || p.contains("PECompact")
+        {
+            score += 18;
+        } else if p.contains("Possibly Packed") {
+            score += 10;
+        } else {
+            score += 12;
+        }
+        indicators.push(format!("Packer/Compiler: {}", p));
     }
 
     if let Some(size) = overlay_size {
@@ -306,7 +313,6 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         }
     }
 
-    // IOCs
     if !iocs.is_empty() {
         let add = (iocs.len() as u32 * 2).min(16);
         score += add;
@@ -361,6 +367,95 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
 
 // ====================== HELPERS ======================
 
+fn detect_packer_and_compiler(
+    sections: &[SectionInfo],
+    strings: &[String],
+    is_rust: bool,
+) -> Option<String> {
+    let mut findings: Vec<String> = Vec::new();
+
+    // Section name based
+    for sec in sections {
+        let name = sec.name.to_lowercase();
+
+        if name.contains("upx") {
+            findings.push("UPX".to_string());
+        }
+        if name.contains("vmp") {
+            findings.push("VMProtect".to_string());
+        }
+        if name.contains("themida") {
+            findings.push("Themida".to_string());
+        }
+        if name.contains("aspack") || name == ".aspack" || name == ".adata" {
+            findings.push("ASPack".to_string());
+        }
+        if name.contains("pec") || name.contains("pecompact") {
+            findings.push("PECompact".to_string());
+        }
+        if name.contains("mpress") {
+            findings.push("MPRESS".to_string());
+        }
+        if name.contains("fsg") {
+            findings.push("FSG".to_string());
+        }
+        if name.contains("petite") {
+            findings.push("Petite".to_string());
+        }
+        if name.contains("enigma") {
+            findings.push("Enigma Protector".to_string());
+        }
+        if name.contains("nsp") || name.contains("nspack") {
+            findings.push("NSPack".to_string());
+        }
+        if name.contains("yoda") {
+            findings.push("Yoda Protector".to_string());
+        }
+    }
+
+    // String based detection
+    for s in strings {
+        let lower = s.to_lowercase();
+
+        if lower.contains("mscoree.dll") || lower.contains("mscoreei.dll") {
+            findings.push(".NET".to_string());
+        }
+        if lower.contains("go.buildid") || lower.contains("runtime.main") || lower.contains("runtime·") {
+            findings.push("Go".to_string());
+        }
+        if lower.contains("pyi_") || lower.contains("pyinstaller") {
+            findings.push("PyInstaller".to_string());
+        }
+        if lower.contains("autoit") {
+            findings.push("AutoIt".to_string());
+        }
+    }
+
+    if is_rust {
+        findings.push("Rust".to_string());
+    }
+
+    // Fallback high entropy
+    let high_entropy = sections.iter().any(|s| s.entropy >= 7.2);
+    if high_entropy && findings.is_empty() {
+        findings.push("Possibly Packed (High Entropy)".to_string());
+    }
+
+    // Unique
+    let mut unique = Vec::new();
+    for f in findings {
+        if !unique.contains(&f) {
+            unique.push(f);
+        }
+    }
+
+    if unique.is_empty() {
+        None
+    } else {
+        Some(unique.join(" + "))
+    }
+}
+
 fn calculate_entropy(data: &[u8]) -> f64 {
     if data.is_empty() {
         return 0.0;
@@ -405,8 +500,15 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<String> {
 
 fn detect_rust(strings: &[String], data: &[u8]) -> bool {
     let keys = [
-        "rustc version", "rust_begin_unwind", "core::panicking", "std::sys",
-        "alloc::", "rust_eh_personality", ".cargo/registry", "rustc-stable", "rustc-nightly",
+        "rustc version",
+        "rust_begin_unwind",
+        "core::panicking",
+        "std::sys",
+        "alloc::",
+        "rust_eh_personality",
+        ".cargo/registry",
+        "rustc-stable",
+        "rustc-nightly",
     ];
     for s in strings {
         for k in &keys {
@@ -441,13 +543,15 @@ fn extract_rustc_info(strings: &[String]) -> (Option<String>, Option<String>) {
 
 fn extract_dependencies_from_paths(strings: &[String]) -> HashSet<CrateInfo> {
     let mut deps = HashSet::new();
-    let re = Regex::new(r"[\\/]([a-zA-Z][a-zA-Z0-9_-]{1,64})-(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)").unwrap();
+    let re = Regex::new(r"[\\/]([a-zA-Z][a-zA-Z0-9_-]{1,64})-(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)")
+        .unwrap();
 
     for s in strings {
         if s.contains(".cargo") || s.contains("registry") {
             for caps in re.captures_iter(s) {
                 let name = caps[1].to_string();
-                if name.len() > 2 && !["src", "registry", "github", "crates"].contains(&name.as_str()) {
+                if name.len() > 2 && !["src", "registry", "github", "crates"].contains(&name.as_str())
+                {
                     deps.insert(CrateInfo {
                         name,
                         version: Some(caps[2].to_string()),
@@ -480,9 +584,15 @@ fn extract_iocs(strings: &[String]) -> Vec<String> {
     let mut iocs = Vec::new();
     let mut seen = HashSet::new();
 
-    let ip_re = Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
-    let url_re = Regex::new(r"https?://[^\s\"'<>]+").unwrap();
-    let domain_re = Regex::new(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|ru|cn|xyz|top|info|biz|online)\b").unwrap();
+    let ip_re = Regex::new(
+        r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b",
+    )
+    .unwrap();
+    let url_re = Regex::new(r#"https?://[^\s"'<>]+"#).unwrap();
+    let domain_re = Regex::new(
+        r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|ru|cn|xyz|top|info|biz|online)\b",
+    )
+    .unwrap();
 
     for s in strings {
         if let Some(m) = ip_re.find(s) {
@@ -494,7 +604,7 @@ fn extract_iocs(strings: &[String]) -> Vec<String> {
         if let Some(m) = url_re.find(s) {
             let url = m.as_str().to_string();
             if seen.insert(url.clone()) {
-                iocs.push(format!("URL: {}", truncate(&url, 70));
+                iocs.push(format!("URL: {}", truncate(&url, 70)));
             }
         }
         if let Some(m) = domain_re.find(s) {
@@ -531,14 +641,25 @@ fn truncate(s: &str, max: usize) -> String {
 fn print_report(report: &AnalysisReport) {
     let width = 66;
 
-    // Header
     println!("{}", "═".repeat(width).bright_cyan());
-    println!("{}", format!("{:^width$}", "MINTAKA v0.4", width = width).bright_cyan().bold());
-    println!("{}", format!("{:^width$}", "Static Analysis & Triage for Rust Binaries", width = width).cyan());
+    println!(
+        "{}",
+        format!("{:^width$}", "MINTAKA v0.5", width = width)
+            .bright_cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        format!(
+            "{:^width$}",
+            "Static Analysis & Triage for Rust Binaries",
+            width = width
+        )
+        .cyan()
+    );
     println!("{}", "═".repeat(width).bright_cyan());
     println!();
 
-    // Basic Info
     println!("{}  {}", "File".bold().white(), report.file);
     println!("{}  {} bytes", "Size".bold().white(), report.file_size);
     println!("{}  {}", "SHA256".bold().white(), report.sha256);
@@ -555,14 +676,13 @@ fn print_report(report: &AnalysisReport) {
         println!("{}  {}", "Entry Point".bold().white(), ep);
     }
     if let Some(p) = &report.packer_hint {
-        println!("{}  {}", "Packer Hint".bold().white(), p.yellow());
+        println!("{}  {}", "Packer/Compiler".bold().white(), p.yellow());
     }
     if let Some(ov) = report.overlay_size {
         println!("{}  {} bytes", "Overlay".bold().white(), ov);
     }
     println!();
 
-    // Triage Box
     let (status_display, color) = match report.risk_level.as_str() {
         "HIGH RISK" => ("[HIGH RISK]".red().bold().to_string(), "red"),
         "NEEDS REVIEW" => ("[NEEDS REVIEW]".yellow().bold().to_string(), "yellow"),
@@ -591,7 +711,6 @@ fn print_report(report: &AnalysisReport) {
     }
     println!();
 
-    // Rust Info
     print!("{}  ", "Is Rust".bold().white());
     if report.is_rust {
         println!("{}", "YES".green().bold());
@@ -606,7 +725,6 @@ fn print_report(report: &AnalysisReport) {
     }
     println!();
 
-    // Suspicious Imports
     if !report.suspicious_imports.is_empty() {
         println!("{}", "Suspicious Imports".bold().red());
         for imp in report.suspicious_imports.iter().take(12) {
@@ -618,19 +736,26 @@ fn print_report(report: &AnalysisReport) {
         println!();
     }
 
-    // Sections
     if !report.sections.is_empty() {
         println!("{}", "Sections".bold().white());
-        println!("  {:<12} {:>10} {:>8} {:>6}  {}", "Name", "Size", "Entropy", "Flags", "Note");
+        println!(
+            "  {:<12} {:>10} {:>8} {:>6}  {}",
+            "Name", "Size", "Entropy", "Flags", "Note"
+        );
         for sec in &report.sections {
-            let note = if sec.suspicious { "← Suspicious".red().to_string() } else { "".to_string() };
-            println!("  {:<12} {:>10} {:>8.2} {:>6}  {}", 
-                sec.name, sec.size, sec.entropy, sec.characteristics, note);
+            let note = if sec.suspicious {
+                "← Suspicious".red().to_string()
+            } else {
+                "".to_string()
+            };
+            println!(
+                "  {:<12} {:>10} {:>8.2} {:>6}  {}",
+                sec.name, sec.size, sec.entropy, sec.characteristics, note
+            );
         }
         println!();
     }
 
-    // IOCs
     if !report.iocs.is_empty() {
         println!("{}", "Extracted IOCs".bold().yellow());
         for ioc in &report.iocs {
@@ -639,7 +764,6 @@ fn print_report(report: &AnalysisReport) {
         println!();
     }
 
-    // Dependencies
     println!("{}", "Dependencies".bold().white());
     if report.dependencies.is_empty() {
         println!("  (none recovered)");
@@ -656,16 +780,14 @@ fn print_report(report: &AnalysisReport) {
     }
     println!();
 
-    // Indicators
     if !report.indicators.is_empty() {
         println!("{}", "Suspicious Indicators".bold().yellow());
-        for ind in report.indicators.iter().take(10) {
+        for ind in report.indicators.iter().take(12) {
             println!("  • {}", ind);
         }
         println!();
     }
 
-    // Notes
     if !report.notes.is_empty() {
         println!("{}", "Notes".bold().white());
         for n in &report.notes {

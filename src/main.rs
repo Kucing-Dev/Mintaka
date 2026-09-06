@@ -8,20 +8,21 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
 #[command(name = "mintaka", about = "Mintaka - Static Analysis & Triage for Rust Binaries")]
 struct Args {
-    /// Path to the binary
-    file: PathBuf,
+    /// File or directory to analyze
+    path: PathBuf,
 
     /// Output as JSON
     #[arg(long)]
     json: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct AnalysisReport {
     file: String,
     file_size: u64,
@@ -64,20 +65,121 @@ struct CrateInfo {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let data = fs::read(&args.file)
-        .with_context(|| format!("Failed to read file: {}", args.file.display()))?;
 
-    let report = analyze(&args.file, &data)?;
-
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+    if args.path.is_dir() {
+        // ========== MASS SCAN MODE ==========
+        mass_scan(&args.path, args.json)?;
     } else {
-        print_report(&report);
+        // ========== SINGLE FILE MODE ==========
+        let data = fs::read(&args.path)
+            .with_context(|| format!("Failed to read file: {}", args.path.display()))?;
+
+        let report = analyze(&args.path, &data)?;
+
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_report(&report);
+        }
     }
+
     Ok(())
 }
 
-fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
+fn mass_scan(dir: &Path, json_output: bool) -> Result<()> {
+    println!("{}", "═".repeat(90).bright_cyan());
+    println!("{}", format!("{:^90}", "MINTAKA v0.6 - Mass Scan Mode").bright_cyan().bold());
+    println!("{}", "═".repeat(90).bright_cyan());
+    println!();
+
+    let mut reports: Vec<AnalysisReport> = Vec::new();
+    let mut total = 0;
+    let mut high = 0;
+    let mut medium = 0;
+    let mut low = 0;
+
+    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        // Skip files that are too small or not likely binaries
+        let metadata = match fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if metadata.len() < 100 || metadata.len() > 100_000_000 {
+            continue;
+        }
+
+        match fs::read(path) {
+            Ok(data) => {
+                if let Ok(report) = analyze(path, &data) {
+                    total += 1;
+                    match report.risk_level.as_str() {
+                        "HIGH RISK" => high += 1,
+                        "NEEDS REVIEW" => medium += 1,
+                        _ => low += 1,
+                    }
+                    reports.push(report);
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+        return Ok(());
+    }
+
+    // Print summary table
+    println!("{:<40} {:>8} {:>12} {:>8} {}", 
+        "File".bold(), "Score".bold(), "Risk".bold(), "Rust".bold(), "Packer/Compiler".bold());
+    println!("{}", "─".repeat(100));
+
+    // Sort by risk score (highest first)
+    reports.sort_by(|a, b| b.risk_score.cmp(&a.risk_score));
+
+    for r in &reports {
+        let filename = Path::new(&r.file)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or(r.file.clone());
+
+        let short_name = if filename.len() > 38 {
+            format!("{}...", &filename[..35])
+        } else {
+            filename
+        };
+
+        let risk_colored = match r.risk_level.as_str() {
+            "HIGH RISK" => r.risk_level.red().bold().to_string(),
+            "NEEDS REVIEW" => r.risk_level.yellow().bold().to_string(),
+            _ => r.risk_level.green().to_string(),
+        };
+
+        let is_rust = if r.is_rust { "YES".green().to_string() } else { "NO".to_string() };
+        let packer = r.packer_hint.clone().unwrap_or_else(|| "-".to_string());
+
+        println!("{:<40} {:>8} {:>12} {:>8} {}", 
+            short_name, r.risk_score, risk_colored, is_rust, packer);
+    }
+
+    println!();
+    println!("{}", "─".repeat(100));
+    println!("{}: {}", "Total files scanned".bold(), total);
+    println!("{}: {}", "HIGH RISK".red().bold(), high);
+    println!("{}: {}", "NEEDS REVIEW".yellow().bold(), medium);
+    println!("{}: {}", "LOW".green().bold(), low);
+    println!();
+
+    Ok(())
+}
+
+fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
     let mut notes = Vec::new();
     let mut indicators = Vec::new();
     let sha256 = hex::encode(Sha256::digest(data));
@@ -175,7 +277,6 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
                 overlay_size = Some(data.len() - max_end);
             }
 
-            // Import analysis
             for import in &pe.imports {
                 let dll = import.dll.to_lowercase();
                 let api_name = import.name.as_ref();
@@ -221,15 +322,12 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         _ => ("Unknown".to_string(), None),
     };
 
-    // Strings & Rust detection
     let strings = extract_strings(data, 5);
     let is_rust = detect_rust(&strings, data);
     let (rustc_version, rustc_commit_hash) = extract_rustc_info(&strings);
 
-    // Better Packer / Compiler Detection
     let packer_hint = detect_packer_and_compiler(&sections_info, &strings, is_rust);
 
-    // Dependencies
     let mut deps = extract_dependencies_from_paths(&strings);
     for d in extract_from_panic_messages(&strings) {
         deps.insert(d);
@@ -237,10 +335,9 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
     let mut dependencies: Vec<CrateInfo> = deps.into_iter().collect();
     dependencies.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // IOC Extraction
     let iocs = extract_iocs(&strings);
 
-    // ====================== RISK SCORING ======================
+    // Risk Scoring
     let mut score: u32 = 0;
 
     if is_rust {
@@ -248,8 +345,7 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
         indicators.push("Compiled with Rust".to_string());
     }
 
-    let import_score = (suspicious_imports.len() as u32 * 6).min(30);
-    score += import_score;
+    score += (suspicious_imports.len() as u32 * 6).min(30);
 
     if file_entropy >= 7.2 {
         score += 12;
@@ -297,8 +393,7 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
     }
 
     if !iocs.is_empty() {
-        let add = (iocs.len() as u32 * 2).min(16);
-        score += add;
+        score += (iocs.len() as u32 * 2).min(16);
     }
 
     if is_rust && rustc_version.is_none() {
@@ -360,50 +455,30 @@ fn detect_packer_and_compiler(
     for sec in sections {
         let name = sec.name.to_lowercase();
 
-        if name.contains("upx") {
-            findings.push("UPX".to_string());
-        }
-        if name.contains("vmp") {
-            findings.push("VMProtect".to_string());
-        }
-        if name.contains("themida") {
-            findings.push("Themida".to_string());
-        }
+        if name.contains("upx") { findings.push("UPX".to_string()); }
+        if name.contains("vmp") { findings.push("VMProtect".to_string()); }
+        if name.contains("themida") { findings.push("Themida".to_string()); }
         if name.contains("aspack") || name == ".aspack" || name == ".adata" {
             findings.push("ASPack".to_string());
         }
         if name.contains("pec") || name.contains("pecompact") {
             findings.push("PECompact".to_string());
         }
-        if name.contains("mpress") {
-            findings.push("MPRESS".to_string());
-        }
-        if name.contains("fsg") {
-            findings.push("FSG".to_string());
-        }
-        if name.contains("petite") {
-            findings.push("Petite".to_string());
-        }
-        if name.contains("enigma") {
-            findings.push("Enigma Protector".to_string());
-        }
+        if name.contains("mpress") { findings.push("MPRESS".to_string()); }
+        if name.contains("fsg") { findings.push("FSG".to_string()); }
+        if name.contains("petite") { findings.push("Petite".to_string()); }
+        if name.contains("enigma") { findings.push("Enigma Protector".to_string()); }
         if name.contains("nsp") || name.contains("nspack") {
             findings.push("NSPack".to_string());
         }
-        if name.contains("yoda") {
-            findings.push("Yoda Protector".to_string());
-        }
+        if name.contains("yoda") { findings.push("Yoda Protector".to_string()); }
     }
 
-    // Deteksi section RWX yang tidak dikenal
     let has_rwx = sections.iter().any(|s| s.suspicious);
     if has_rwx {
         let known = findings.iter().any(|f| {
-            f.contains("UPX")
-                || f.contains("VMProtect")
-                || f.contains("Themida")
-                || f.contains("ASPack")
-                || f.contains("PECompact")
+            f.contains("UPX") || f.contains("VMProtect") || f.contains("Themida")
+                || f.contains("ASPack") || f.contains("PECompact")
         });
         if !known {
             findings.push("Unknown Packer / Custom Protector (RWX section)".to_string());
@@ -412,7 +487,6 @@ fn detect_packer_and_compiler(
 
     for s in strings {
         let lower = s.to_lowercase();
-
         if lower.contains("mscoree.dll") || lower.contains("mscoreei.dll") {
             findings.push(".NET".to_string());
         }
@@ -436,7 +510,6 @@ fn detect_packer_and_compiler(
         findings.push("Possibly Packed (High Entropy)".to_string());
     }
 
-    // Unique
     let mut unique = Vec::new();
     for f in findings {
         if !unique.contains(&f) {
@@ -621,14 +694,12 @@ fn truncate(s: &str, max: usize) -> String {
 fn print_report(report: &AnalysisReport) {
     let width = 66;
 
-    // Header
     println!("{}", "═".repeat(width).bright_cyan());
-    println!("{}", format!("{:^width$}", "MINTAKA v0.5.1", width = width).bright_cyan().bold());
+    println!("{}", format!("{:^width$}", "MINTAKA v0.6", width = width).bright_cyan().bold());
     println!("{}", format!("{:^width$}", "Static Analysis & Triage for Rust Binaries", width = width).cyan());
     println!("{}", "═".repeat(width).bright_cyan());
     println!();
 
-    // Basic Info
     println!("{}  {}", "File".bold().white(), report.file);
     println!("{}  {} bytes", "Size".bold().white(), report.file_size);
     println!("{}  {}", "SHA256".bold().white(), report.sha256);
@@ -652,7 +723,6 @@ fn print_report(report: &AnalysisReport) {
     }
     println!();
 
-    // Triage Box (Fixed)
     let (status_display, color) = match report.risk_level.as_str() {
         "HIGH RISK" => ("[HIGH RISK]".red().bold().to_string(), "red"),
         "NEEDS REVIEW" => ("[NEEDS REVIEW]".yellow().bold().to_string(), "yellow"),
@@ -683,7 +753,6 @@ fn print_report(report: &AnalysisReport) {
     }
     println!();
 
-    // Rust Info
     print!("{}  ", "Is Rust".bold().white());
     if report.is_rust {
         println!("{}", "YES".green().bold());
@@ -698,19 +767,14 @@ fn print_report(report: &AnalysisReport) {
     }
     println!();
 
-    // Suspicious Imports
     if !report.suspicious_imports.is_empty() {
         println!("{}", "Suspicious Imports".bold().red());
         for imp in report.suspicious_imports.iter().take(12) {
             println!("  • {}", imp);
         }
-        if report.suspicious_imports.len() > 12 {
-            println!("  ... and {} more", report.suspicious_imports.len() - 12);
-        }
         println!();
     }
 
-    // Sections
     if !report.sections.is_empty() {
         println!("{}", "Sections".bold().white());
         println!("  {:<12} {:>10} {:>8} {:>6}  {}", "Name", "Size", "Entropy", "Flags", "Note");
@@ -726,7 +790,6 @@ fn print_report(report: &AnalysisReport) {
         println!();
     }
 
-    // IOCs
     if !report.iocs.is_empty() {
         println!("{}", "Extracted IOCs".bold().yellow());
         for ioc in &report.iocs {
@@ -735,7 +798,6 @@ fn print_report(report: &AnalysisReport) {
         println!();
     }
 
-    // Dependencies
     println!("{}", "Dependencies".bold().white());
     if report.dependencies.is_empty() {
         println!("  (none recovered)");
@@ -746,13 +808,9 @@ fn print_report(report: &AnalysisReport) {
                 None => println!("  • {}", dep.name),
             }
         }
-        if report.dependencies.len() > 10 {
-            println!("  ... and {} more", report.dependencies.len() - 10);
-        }
     }
     println!();
 
-    // Indicators
     if !report.indicators.is_empty() {
         println!("{}", "Suspicious Indicators".bold().yellow());
         for ind in report.indicators.iter().take(12) {
@@ -761,7 +819,6 @@ fn print_report(report: &AnalysisReport) {
         println!();
     }
 
-    // Notes
     if !report.notes.is_empty() {
         println!("{}", "Notes".bold().white());
         for n in &report.notes {

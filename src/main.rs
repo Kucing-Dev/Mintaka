@@ -272,9 +272,12 @@ fn analyze(path: &PathBuf, data: &[u8]) -> Result<AnalysisReport> {
     }
 
     if let Some(ref p) = packer_hint {
-        if p.contains("UPX") || p.contains("VMProtect") || p.contains("Themida") 
-            || p.contains("ASPack") || p.contains("PECompact") {
+        if p.contains("UPX") || p.contains("VMProtect") || p.contains("Themida")
+            || p.contains("ASPack") || p.contains("PECompact")
+        {
             score += 18;
+        } else if p.contains("Unknown Packer") || p.contains("Custom") {
+            score += 14;
         } else if p.contains("Possibly Packed") {
             score += 10;
         } else {
@@ -392,13 +395,28 @@ fn detect_packer_and_compiler(
         }
     }
 
+    // Deteksi section RWX yang tidak dikenal
+    let has_rwx = sections.iter().any(|s| s.suspicious);
+    if has_rwx {
+        let known = findings.iter().any(|f| {
+            f.contains("UPX")
+                || f.contains("VMProtect")
+                || f.contains("Themida")
+                || f.contains("ASPack")
+                || f.contains("PECompact")
+        });
+        if !known {
+            findings.push("Unknown Packer / Custom Protector (RWX section)".to_string());
+        }
+    }
+
     for s in strings {
         let lower = s.to_lowercase();
 
         if lower.contains("mscoree.dll") || lower.contains("mscoreei.dll") {
             findings.push(".NET".to_string());
         }
-        if lower.contains("go.buildid") || lower.contains("runtime.main") || lower.contains("runtime·") {
+        if lower.contains("go.buildid") || lower.contains("runtime.main") {
             findings.push("Go".to_string());
         }
         if lower.contains("pyi_") || lower.contains("pyinstaller") {
@@ -418,6 +436,7 @@ fn detect_packer_and_compiler(
         findings.push("Possibly Packed (High Entropy)".to_string());
     }
 
+    // Unique
     let mut unique = Vec::new();
     for f in findings {
         if !unique.contains(&f) {
@@ -602,12 +621,14 @@ fn truncate(s: &str, max: usize) -> String {
 fn print_report(report: &AnalysisReport) {
     let width = 66;
 
+    // Header
     println!("{}", "═".repeat(width).bright_cyan());
-    println!("{}", format!("{:^width$}", "MINTAKA v0.5", width = width).bright_cyan().bold());
+    println!("{}", format!("{:^width$}", "MINTAKA v0.5.1", width = width).bright_cyan().bold());
     println!("{}", format!("{:^width$}", "Static Analysis & Triage for Rust Binaries", width = width).cyan());
     println!("{}", "═".repeat(width).bright_cyan());
     println!();
 
+    // Basic Info
     println!("{}  {}", "File".bold().white(), report.file);
     println!("{}  {} bytes", "Size".bold().white(), report.file_size);
     println!("{}  {}", "SHA256".bold().white(), report.sha256);
@@ -631,34 +652,38 @@ fn print_report(report: &AnalysisReport) {
     }
     println!();
 
+    // Triage Box (Fixed)
     let (status_display, color) = match report.risk_level.as_str() {
         "HIGH RISK" => ("[HIGH RISK]".red().bold().to_string(), "red"),
         "NEEDS REVIEW" => ("[NEEDS REVIEW]".yellow().bold().to_string(), "yellow"),
         _ => ("[LOW]".green().bold().to_string(), "green"),
     };
 
+    let border = "─".repeat(64);
+
     match color {
         "red" => {
-            println!("{}", "┌────────────────────────────────────────────────────────────────┐".red());
-            println!("{}  Status      : {:<49}{}", "│".red(), status_display, "│".red());
-            println!("{}  Risk Score  : {:>3} / 100{:<41}{}", "│".red(), report.risk_score, "", "│".red());
-            println!("{}", "└────────────────────────────────────────────────────────────────┘".red());
+            println!("{}", format!("┌{}┐", border).red());
+            println!("{}  Status      : {:<48} {}", "│".red(), status_display, "│".red());
+            println!("{}  Risk Score  : {:>3} / 100{:<40} {}", "│".red(), report.risk_score, "", "│".red());
+            println!("{}", format!("└{}┘", border).red());
         }
         "yellow" => {
-            println!("{}", "┌────────────────────────────────────────────────────────────────┐".yellow());
-            println!("{}  Status      : {:<49}{}", "│".yellow(), status_display, "│".yellow());
-            println!("{}  Risk Score  : {:>3} / 100{:<41}{}", "│".yellow(), report.risk_score, "", "│".yellow());
-            println!("{}", "└────────────────────────────────────────────────────────────────┘".yellow());
+            println!("{}", format!("┌{}┐", border).yellow());
+            println!("{}  Status      : {:<48} {}", "│".yellow(), status_display, "│".yellow());
+            println!("{}  Risk Score  : {:>3} / 100{:<40} {}", "│".yellow(), report.risk_score, "", "│".yellow());
+            println!("{}", format!("└{}┘", border).yellow());
         }
         _ => {
-            println!("{}", "┌────────────────────────────────────────────────────────────────┐".green());
-            println!("{}  Status      : {:<49}{}", "│".green(), status_display, "│".green());
-            println!("{}  Risk Score  : {:>3} / 100{:<41}{}", "│".green(), report.risk_score, "", "│".green());
-            println!("{}", "└────────────────────────────────────────────────────────────────┘".green());
+            println!("{}", format!("┌{}┐", border).green());
+            println!("{}  Status      : {:<48} {}", "│".green(), status_display, "│".green());
+            println!("{}  Risk Score  : {:>3} / 100{:<40} {}", "│".green(), report.risk_score, "", "│".green());
+            println!("{}", format!("└{}┘", border).green());
         }
     }
     println!();
 
+    // Rust Info
     print!("{}  ", "Is Rust".bold().white());
     if report.is_rust {
         println!("{}", "YES".green().bold());
@@ -673,6 +698,7 @@ fn print_report(report: &AnalysisReport) {
     }
     println!();
 
+    // Suspicious Imports
     if !report.suspicious_imports.is_empty() {
         println!("{}", "Suspicious Imports".bold().red());
         for imp in report.suspicious_imports.iter().take(12) {
@@ -684,6 +710,7 @@ fn print_report(report: &AnalysisReport) {
         println!();
     }
 
+    // Sections
     if !report.sections.is_empty() {
         println!("{}", "Sections".bold().white());
         println!("  {:<12} {:>10} {:>8} {:>6}  {}", "Name", "Size", "Entropy", "Flags", "Note");
@@ -693,12 +720,13 @@ fn print_report(report: &AnalysisReport) {
             } else {
                 "".to_string()
             };
-            println!("  {:<12} {:>10} {:>8.2} {:>6}  {}", 
+            println!("  {:<12} {:>10} {:>8.2} {:>6}  {}",
                 sec.name, sec.size, sec.entropy, sec.characteristics, note);
         }
         println!();
     }
 
+    // IOCs
     if !report.iocs.is_empty() {
         println!("{}", "Extracted IOCs".bold().yellow());
         for ioc in &report.iocs {
@@ -707,6 +735,7 @@ fn print_report(report: &AnalysisReport) {
         println!();
     }
 
+    // Dependencies
     println!("{}", "Dependencies".bold().white());
     if report.dependencies.is_empty() {
         println!("  (none recovered)");
@@ -723,6 +752,7 @@ fn print_report(report: &AnalysisReport) {
     }
     println!();
 
+    // Indicators
     if !report.indicators.is_empty() {
         println!("{}", "Suspicious Indicators".bold().yellow());
         for ind in report.indicators.iter().take(12) {
@@ -731,6 +761,7 @@ fn print_report(report: &AnalysisReport) {
         println!();
     }
 
+    // Notes
     if !report.notes.is_empty() {
         println!("{}", "Notes".bold().white());
         for n in &report.notes {

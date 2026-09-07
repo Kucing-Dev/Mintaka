@@ -188,10 +188,8 @@ LOW: 5
 
 MIT License
 
----
 
 **Mintaka** — Fast static triage for modern malware analysis.
-```
 
 
 

@@ -37,14 +37,17 @@ It helps malware analysts quickly triage suspicious binaries by extracting impor
   - Extracts `rustc` version and commit hash (when available)  
   - Attempts to recover crate dependencies
 
+### Mass Scan Mode
+Scan an entire directory of samples at once and get a clean summary table.
+
 ### Risk Scoring
 Mintaka calculates a risk score (0-100) based on multiple indicators:
 
 | Score     | Level              | Meaning                        |
 |-----------|--------------------|--------------------------------|
-| 0 - 44    | `[LOW]`            | Low suspicion                  |
-| 45 - 74   | `[NEEDS REVIEW]`   | Needs manual inspection        |
-| 75 - 100  | `[HIGH RISK]`      | High suspicion / priority      |
+| 0 - 44    | `LOW`              | Low suspicion                  |
+| 45 - 74   | `NEEDS REVIEW`     | Needs manual inspection        |
+| 75 - 100  | `HIGH RISK`        | High suspicion / priority      |
 
 ---
 
@@ -69,29 +72,37 @@ Binary location:
 
 ## Usage
 
-### Basic Analysis
+### Single File Analysis
 ```bash
 ./mintaka sample.exe
+```
+
+### Mass Scan (Directory)
+```bash
+./mintaka ./malware_samples/
 ```
 
 ### JSON Output
 ```bash
 ./mintaka sample.exe --json
+./mintaka ./malware_samples/ --json
 ```
 
 ---
 
 ## Example Output
 
+### Single File Mode
+
 ```text
 ══════════════════════════════════════════════════════════════════
-                         MINTAKA v0.5.1
+                         MINTAKA v0.6
             Static Analysis & Triage for Rust Binaries
 ══════════════════════════════════════════════════════════════════
 
 File              malware.exe
 Size              7168 bytes
-SHA256            fe3c812c9088dba5ae9d683f705eefa2fb990bd7ad97ee82466f0c5046615a1e
+SHA256            fe3c812c...
 Format            PE
 Architecture      x86
 File Entropy      1.28
@@ -113,18 +124,30 @@ Suspicious Imports
 Sections
   Name         Size    Entropy  Flags  Note
   .text         512      0.60     RX
-  .rdata        512      2.58     R
-  .data        4096      0.03     RW
-  .reloc        512      0.14     R
   .jvjp         512      5.64    RWX   ← Suspicious
+```
 
-Suspicious Indicators
-  • Suspicious section: .jvjp (Writable + Executable)
-  • Suspicious import: kernel32.dll!VirtualProtect
-  • Packer/Compiler: Unknown Packer / Custom Protector (RWX section)
+### Mass Scan Mode
 
-Notes
-  - This does not appear to be a Rust binary
+```text
+═══════════════════════════════════════════════════════════════════════════════════════════
+                              MINTAKA v0.6 - Mass Scan Mode
+═══════════════════════════════════════════════════════════════════════════════════════════
+
+File                              Score  Risk          Rust  Packer/Compiler
+───────────────────────────────────────────────────────────────────────────────────────────
+malware_upx.exe                     100  HIGH RISK     NO    UPX
+malware_https.exe                    39  LOW           NO    Unknown Packer / Custom Protector...
+malware_shikata.exe                  35  LOW           NO    Unknown Packer / Custom Protector...
+shell_staged.exe                     35  LOW           NO    Unknown Packer / Custom Protector...
+malware_stageless.exe                35  LOW           NO    Unknown Packer / Custom Protector...
+malware_standard.exe                 18  LOW           NO    -
+
+───────────────────────────────────────────────────────────────────────────────────────────
+Total files scanned: 6
+HIGH RISK: 1
+NEEDS REVIEW: 0
+LOW: 5
 ```
 
 ---
@@ -136,6 +159,7 @@ Notes
 - YARA rules are not yet integrated
 - No online lookup (VirusTotal, etc.) — offline first design
 - Rust dependency recovery depends on available strings in the binary
+- Very large files (>80MB) are skipped in Mass Scan mode
 
 ---
 
@@ -149,18 +173,24 @@ Notes
 - [x] Packer / Compiler detection
 - [x] Risk scoring system
 - [x] Rust binary detection
+- [x] Mass Scan Mode
 
 ### Planned
-- [ ] Mass scan mode (scan entire folder)
 - [ ] Better resource analysis
 - [ ] Optional YARA support
 - [ ] HTML report export
 - [ ] Entry point disassembly preview
+- [ ] CSV export for mass scan
 
 ---
 
 ## License
 
 MIT License
+
+
+**Mintaka** — Fast static triage for modern malware analysis.
+
+
 
 

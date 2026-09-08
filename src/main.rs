@@ -86,7 +86,12 @@ fn main() -> Result<()> {
 
 fn mass_scan(dir: &Path, json_output: bool) -> Result<()> {
     println!("{}", "═".repeat(100).bright_cyan());
-    println!("{}", format!("{:^100}", "MINTAKA v0.7 - Mass Scan Mode").bright_cyan().bold());
+    println!(
+        "{}",
+        format!("{:^100}", "MINTAKA v0.7 - Mass Scan Mode")
+            .bright_cyan()
+            .bold()
+    );
     println!("{}", "═".repeat(100).bright_cyan());
     println!();
 
@@ -218,21 +223,45 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
     let mut resource_size: Option<u32> = None;
 
     let dangerous_apis: HashSet<&str> = [
-        "VirtualAlloc", "VirtualAllocEx", "VirtualProtect", "VirtualProtectEx",
-        "WriteProcessMemory", "ReadProcessMemory", "CreateRemoteThread",
-        "NtCreateThreadEx", "RtlCreateUserThread", "WinExec", "ShellExecuteA",
-        "ShellExecuteW", "CreateProcessA", "CreateProcessW", "URLDownloadToFileA",
-        "URLDownloadToFileW", "socket", "connect", "send", "recv", "WSAStartup",
-        "InternetOpenA", "InternetOpenUrlA", "HttpSendRequestA", "IsDebuggerPresent",
-        "CheckRemoteDebuggerPresent", "GetProcAddress", "LoadLibraryA", "LoadLibraryW",
-        "OpenProcess", "TerminateProcess", "SetWindowsHookExA", "SetWindowsHookExW",
-        "RegSetValueExA", "RegSetValueExW",
+        "VirtualAlloc",
+        "VirtualAllocEx",
+        "VirtualProtect",
+        "VirtualProtectEx",
+        "WriteProcessMemory",
+        "ReadProcessMemory",
+        "CreateRemoteThread",
+        "NtCreateThreadEx",
+        "RtlCreateUserThread",
+        "WinExec",
+        "ShellExecuteA",
+        "ShellExecuteW",
+        "CreateProcessA",
+        "CreateProcessW",
+        "URLDownloadToFileA",
+        "URLDownloadToFileW",
+        "socket",
+        "connect",
+        "send",
+        "recv",
+        "WSAStartup",
+        "InternetOpenA",
+        "InternetOpenUrlA",
+        "HttpSendRequestA",
+        "IsDebuggerPresent",
+        "CheckRemoteDebuggerPresent",
+        "GetProcAddress",
+        "LoadLibraryA",
+        "LoadLibraryW",
+        "OpenProcess",
+        "TerminateProcess",
+        "SetWindowsHookExA",
+        "SetWindowsHookExW",
+        "RegSetValueExA",
+        "RegSetValueExW",
     ]
     .iter()
     .cloned()
     .collect();
-
-}
 
     let (format, architecture) = match Object::parse(data)? {
         Object::PE(pe) => {
@@ -243,40 +272,27 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 _ => None,
             };
 
-        }
-
             let ts = pe.header.coff_header.time_date_stamp;
             if ts > 0 {
                 if let Some(dt) = Utc.timestamp_opt(ts as i64, 0).single() {
                     compile_timestamp = Some(dt.format("%Y-%m-%d %H:%M:%S UTC").to_string());
                 }
             }
-        
 
             if let Some(opt) = pe.header.optional_header {
-                entry_point = Some(format!("0x{:08X}", opt.standard_fields.address_of_entry_point));
+                entry_point = Some(format!(
+                    "0x{:08X}",
+                    opt.standard_fields.address_of_entry_point
+                ));
 
-                // ===== Resource Detection (Fixed) =====
+                // Resource Detection
                 if let Some(data_dir) = opt.data_directories.get(2) {
                     if data_dir.virtual_address > 0 && data_dir.size > 0 {
                         has_resources = true;
                         resource_size = Some(data_dir.size);
                     }
-
-                    if let Some(opt) = &pe.header.optional_header {
-            entry_point = Some(format!("0x{:08X}", opt.standard_fields.address_of_entry_point));
-
-            // Resource detection 
-            if let Some(Some((_, data_dir))) = opt.data_directories.data_directories.get(2) { // IMAGE_DIRECTORY_ENTRY_RESOURCE = 2
-                if data_dir.virtual_address > 0 && data_dir.size > 0 {
-                    has_resources = true;
-                    resource_size = Some(data_dir.size as u32);
-
                 }
             }
-        } 
-
-            
 
             section_count = pe.sections.len();
             let mut max_end = 0usize;
@@ -294,10 +310,18 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 let executable = chars & 0x20000000 != 0;
 
                 let mut char_str = String::new();
-                if readable { char_str.push('R'); }
-                if writable { char_str.push('W'); }
-                if executable { char_str.push('X'); }
-                if char_str.is_empty() { char_str.push('-'); }
+                if readable {
+                    char_str.push('R');
+                }
+                if writable {
+                    char_str.push('W');
+                }
+                if executable {
+                    char_str.push('X');
+                }
+                if char_str.is_empty() {
+                    char_str.push('-');
+                }
 
                 let mut entropy = 0.0;
                 if offset + size <= data.len() && size > 0 {
@@ -306,7 +330,10 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
 
                 let suspicious = writable && executable;
                 if suspicious {
-                    indicators.push(format!("Suspicious section: {} (Writable + Executable)", name));
+                    indicators.push(format!(
+                        "Suspicious section: {} (Writable + Executable)",
+                        name
+                    ));
                 }
 
                 sections_info.push(SectionInfo {
@@ -323,7 +350,7 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 }
             }
 
-            // Fallback: cek section .rsrc
+            // Fallback resource detection via .rsrc section
             if !has_resources {
                 for sec in &sections_info {
                     let lname = sec.name.to_lowercase();
@@ -421,14 +448,21 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
         }
         if sec.entropy >= 7.0 {
             score += 10;
-            indicators.push(format!("High entropy section: {} ({:.2})", sec.name, sec.entropy));
+            indicators.push(format!(
+                "High entropy section: {} ({:.2})",
+                sec.name, sec.entropy
+            ));
         } else if sec.entropy >= 6.5 {
             score += 5;
         }
     }
 
     if let Some(ref p) = packer_hint {
-        if p.contains("UPX") || p.contains("VMProtect") || p.contains("Themida") || p.contains("ASPack") {
+        if p.contains("UPX")
+            || p.contains("VMProtect")
+            || p.contains("Themida")
+            || p.contains("ASPack")
+        {
             score += 18;
         } else if p.contains("Unknown Packer") || p.contains("Custom") {
             score += 14;
@@ -526,19 +560,33 @@ fn detect_packer_and_compiler(
 
     for sec in sections {
         let name = sec.name.to_lowercase();
-        if name.contains("upx") { findings.push("UPX".to_string()); }
-        if name.contains("vmp") { findings.push("VMProtect".to_string()); }
-        if name.contains("themida") { findings.push("Themida".to_string()); }
+        if name.contains("upx") {
+            findings.push("UPX".to_string());
+        }
+        if name.contains("vmp") {
+            findings.push("VMProtect".to_string());
+        }
+        if name.contains("themida") {
+            findings.push("Themida".to_string());
+        }
         if name.contains("aspack") || name == ".aspack" || name == ".adata" {
             findings.push("ASPack".to_string());
         }
         if name.contains("pec") || name.contains("pecompact") {
             findings.push("PECompact".to_string());
         }
-        if name.contains("mpress") { findings.push("MPRESS".to_string()); }
-        if name.contains("fsg") { findings.push("FSG".to_string()); }
-        if name.contains("petite") { findings.push("Petite".to_string()); }
-        if name.contains("enigma") { findings.push("Enigma".to_string()); }
+        if name.contains("mpress") {
+            findings.push("MPRESS".to_string());
+        }
+        if name.contains("fsg") {
+            findings.push("FSG".to_string());
+        }
+        if name.contains("petite") {
+            findings.push("Petite".to_string());
+        }
+        if name.contains("enigma") {
+            findings.push("Enigma".to_string());
+        }
         if name.contains("nsp") || name.contains("nspack") {
             findings.push("NSPack".to_string());
         }
@@ -547,7 +595,10 @@ fn detect_packer_and_compiler(
     let has_rwx = sections.iter().any(|s| s.suspicious);
     if has_rwx {
         let known = findings.iter().any(|f| {
-            f.contains("UPX") || f.contains("VMProtect") || f.contains("Themida") || f.contains("ASPack")
+            f.contains("UPX")
+                || f.contains("VMProtect")
+                || f.contains("Themida")
+                || f.contains("ASPack")
         });
         if !known {
             findings.push("Unknown Packer / Custom Protector (RWX)".to_string());
@@ -556,7 +607,9 @@ fn detect_packer_and_compiler(
 
     for s in strings {
         let lower = s.to_lowercase();
-        if lower.contains("mscoree.dll") { findings.push(".NET".to_string()); }
+        if lower.contains("mscoree.dll") {
+            findings.push(".NET".to_string());
+        }
         if lower.contains("go.buildid") || lower.contains("runtime.main") {
             findings.push("Go".to_string());
         }
@@ -631,8 +684,15 @@ fn extract_strings(data: &[u8], min_len: usize) -> Vec<String> {
 
 fn detect_rust(strings: &[String], data: &[u8]) -> bool {
     let keys = [
-        "rustc version", "rust_begin_unwind", "core::panicking", "std::sys",
-        "alloc::", "rust_eh_personality", ".cargo/registry", "rustc-stable", "rustc-nightly",
+        "rustc version",
+        "rust_begin_unwind",
+        "core::panicking",
+        "std::sys",
+        "alloc::",
+        "rust_eh_personality",
+        ".cargo/registry",
+        "rustc-stable",
+        "rustc-nightly",
     ];
     for s in strings {
         for k in &keys {
@@ -667,13 +727,16 @@ fn extract_rustc_info(strings: &[String]) -> (Option<String>, Option<String>) {
 
 fn extract_dependencies_from_paths(strings: &[String]) -> HashSet<CrateInfo> {
     let mut deps = HashSet::new();
-    let re = Regex::new(r"[\\/]([a-zA-Z][a-zA-Z0-9_-]{1,64})-(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)").unwrap();
+    let re = Regex::new(r"[\\/]([a-zA-Z][a-zA-Z0-9_-]{1,64})-(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)")
+        .unwrap();
 
     for s in strings {
         if s.contains(".cargo") || s.contains("registry") {
             for caps in re.captures_iter(s) {
                 let name = caps[1].to_string();
-                if name.len() > 2 && !["src", "registry", "github", "crates"].contains(&name.as_str()) {
+                if name.len() > 2
+                    && !["src", "registry", "github", "crates"].contains(&name.as_str())
+                {
                     deps.insert(CrateInfo {
                         name,
                         version: Some(caps[2].to_string()),
@@ -706,9 +769,15 @@ fn extract_iocs(strings: &[String]) -> Vec<String> {
     let mut iocs = Vec::new();
     let mut seen = HashSet::new();
 
-    let ip_re = Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
+    let ip_re = Regex::new(
+        r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b",
+    )
+    .unwrap();
     let url_re = Regex::new(r#"https?://[^\s"'<>]+"#).unwrap();
-    let domain_re = Regex::new(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|ru|cn|xyz|top|info|biz|online)\b").unwrap();
+    let domain_re = Regex::new(
+        r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|ru|cn|xyz|top|info|biz|online)\b",
+    )
+    .unwrap();
 
     for s in strings {
         if let Some(m) = ip_re.find(s) {
@@ -758,8 +827,21 @@ fn print_report(report: &AnalysisReport) {
     let width = 66;
 
     println!("{}", "═".repeat(width).bright_cyan());
-    println!("{}", format!("{:^width$}", "MINTAKA v0.7", width = width).bright_cyan().bold());
-    println!("{}", format!("{:^width$}", "Static Analysis & Triage for Rust Binaries", width = width).cyan());
+    println!(
+        "{}",
+        format!("{:^width$}", "MINTAKA v0.7", width = width)
+            .bright_cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        format!(
+            "{:^width$}",
+            "Static Analysis & Triage for Rust Binaries",
+            width = width
+        )
+        .cyan()
+    );
     println!("{}", "═".repeat(width).bright_cyan());
     println!();
 
@@ -782,7 +864,6 @@ fn print_report(report: &AnalysisReport) {
         println!("{}  {}", "Packer/Compiler".bold().white(), p.yellow());
     }
 
-    // Resources line
     if report.has_resources {
         let res_info = match report.resource_size {
             Some(sz) => format!("Yes ({} bytes)", sz),
@@ -807,20 +888,53 @@ fn print_report(report: &AnalysisReport) {
     match color {
         "red" => {
             println!("{}", format!("┌{}┐", border).red());
-            println!("{}  Status      : {:<48} {}", "│".red(), status_display, "│".red());
-            println!("{}  Risk Score  : {:>3} / 100{:<40} {}", "│".red(), report.risk_score, "", "│".red());
+            println!(
+                "{}  Status      : {:<48} {}",
+                "│".red(),
+                status_display,
+                "│".red()
+            );
+            println!(
+                "{}  Risk Score  : {:>3} / 100{:<40} {}",
+                "│".red(),
+                report.risk_score,
+                "",
+                "│".red()
+            );
             println!("{}", format!("└{}┘", border).red());
         }
         "yellow" => {
             println!("{}", format!("┌{}┐", border).yellow());
-            println!("{}  Status      : {:<48} {}", "│".yellow(), status_display, "│".yellow());
-            println!("{}  Risk Score  : {:>3} / 100{:<40} {}", "│".yellow(), report.risk_score, "", "│".yellow());
+            println!(
+                "{}  Status      : {:<48} {}",
+                "│".yellow(),
+                status_display,
+                "│".yellow()
+            );
+            println!(
+                "{}  Risk Score  : {:>3} / 100{:<40} {}",
+                "│".yellow(),
+                report.risk_score,
+                "",
+                "│".yellow()
+            );
             println!("{}", format!("└{}┘", border).yellow());
         }
         _ => {
             println!("{}", format!("┌{}┐", border).green());
-            println!("{}  Status      : {:<48} {}", "│".green(), status_display, "│".green());
-            println!("{}  Risk Score  : {:>3} / 100{:<40} {}", "│".green(), report.risk_score, "", "│".green());
+            println!(
+                "{}  Status      : {:<48} {}",
+                "│".green(),
+                status_display,
+                "│".green()
+            );
+            println!(
+                "{}  Risk Score  : {:>3} / 100{:<40} {}",
+                "│".green(),
+                report.risk_score,
+                "",
+                "│".green()
+            );
             println!("{}", format!("└{}┘", border).green());
         }
     }
@@ -850,15 +964,20 @@ fn print_report(report: &AnalysisReport) {
 
     if !report.sections.is_empty() {
         println!("{}", "Sections".bold().white());
-        println!("  {:<12} {:>10} {:>8} {:>6}  {}", "Name", "Size", "Entropy", "Flags", "Note");
+        println!(
+            "  {:<12} {:>10} {:>8} {:>6}  {}",
+            "Name", "Size", "Entropy", "Flags", "Note"
+        );
         for sec in &report.sections {
             let note = if sec.suspicious {
                 "← Suspicious".red().to_string()
             } else {
                 "".to_string()
             };
-            println!("  {:<12} {:>10} {:>8.2} {:>6}  {}",
-                sec.name, sec.size, sec.entropy, sec.characteristics, note);
+            println!(
+                "  {:<12} {:>10} {:>8.2} {:>6}  {}",
+                sec.name, sec.size, sec.entropy, sec.characteristics, note
+            );
         }
         println!();
     }

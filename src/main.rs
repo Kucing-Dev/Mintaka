@@ -232,6 +232,8 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
     .cloned()
     .collect();
 
+}
+
     let (format, architecture) = match Object::parse(data)? {
         Object::PE(pe) => {
             let arch = match pe.header.coff_header.machine {
@@ -241,12 +243,15 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 _ => None,
             };
 
+        }
+
             let ts = pe.header.coff_header.time_date_stamp;
             if ts > 0 {
                 if let Some(dt) = Utc.timestamp_opt(ts as i64, 0).single() {
                     compile_timestamp = Some(dt.format("%Y-%m-%d %H:%M:%S UTC").to_string());
                 }
             }
+        
 
             if let Some(opt) = pe.header.optional_header {
                 entry_point = Some(format!("0x{:08X}", opt.standard_fields.address_of_entry_point));
@@ -257,8 +262,21 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                         has_resources = true;
                         resource_size = Some(data_dir.size);
                     }
+
+                    if let Some(opt) = &pe.header.optional_header {
+            entry_point = Some(format!("0x{:08X}", opt.standard_fields.address_of_entry_point));
+
+            // Resource detection 
+            if let Some(Some((_, data_dir))) = opt.data_directories.data_directories.get(2) { // IMAGE_DIRECTORY_ENTRY_RESOURCE = 2
+                if data_dir.virtual_address > 0 && data_dir.size > 0 {
+                    has_resources = true;
+                    resource_size = Some(data_dir.size as u32);
+
                 }
             }
+        } 
+
+            
 
             section_count = pe.sections.len();
             let mut max_end = 0usize;

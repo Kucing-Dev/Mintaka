@@ -129,7 +129,6 @@ fn mass_scan(dir: &Path, json_output: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Header - fixed width
     println!(
         "{:<28} {:>7} {:>6} {:<12} {:<4} {}",
         "File".bold(),
@@ -249,14 +248,14 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 }
             }
 
-            if let Some(opt) = &pe.header.optional_header {
+            if let Some(opt) = pe.header.optional_header {
                 entry_point = Some(format!("0x{:08X}", opt.standard_fields.address_of_entry_point));
 
-                // Resource detection
-                if let Some(res_dir) = opt.data_directories.get(2) { // IMAGE_DIRECTORY_ENTRY_RESOURCE = 2
-                    if res_dir.virtual_address > 0 && res_dir.size > 0 {
+                // ===== Resource Detection (Fixed) =====
+                if let Some(data_dir) = opt.data_directories.get(2) {
+                    if data_dir.virtual_address > 0 && data_dir.size > 0 {
                         has_resources = true;
-                        resource_size = Some(res_dir.size);
+                        resource_size = Some(data_dir.size);
                     }
                 }
             }
@@ -265,7 +264,9 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
             let mut max_end = 0usize;
 
             for section in &pe.sections {
-                let name = String::from_utf8_lossy(&section.name).trim_end_matches('\0').to_string();
+                let name = String::from_utf8_lossy(&section.name)
+                    .trim_end_matches('\0')
+                    .to_string();
                 let offset = section.pointer_to_raw_data as usize;
                 let size = section.size_of_raw_data as usize;
                 let chars = section.characteristics;
@@ -304,6 +305,18 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 }
             }
 
+            // Fallback: cek section .rsrc
+            if !has_resources {
+                for sec in &sections_info {
+                    let lname = sec.name.to_lowercase();
+                    if lname == ".rsrc" || lname.contains("rsrc") {
+                        has_resources = true;
+                        resource_size = Some(sec.size as u32);
+                        break;
+                    }
+                }
+            }
+
             if max_end > 0 && data.len() > max_end + 64 {
                 overlay_size = Some(data.len() - max_end);
             }
@@ -327,6 +340,7 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 goblin::elf::header::EM_AARCH64 => Some("aarch64".to_string()),
                 _ => None,
             };
+
             section_count = elf.section_headers.len();
             entry_point = Some(format!("0x{:X}", elf.header.e_entry));
 
@@ -417,6 +431,8 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
             } else {
                 indicators.push("Resources detected".to_string());
             }
+        } else {
+            indicators.push("Resources detected".to_string());
         }
     }
 
@@ -554,7 +570,9 @@ fn detect_packer_and_compiler(
 }
 
 fn calculate_entropy(data: &[u8]) -> f64 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     let mut freq = [0u64; 256];
     for &b in data {
         freq[b as usize] += 1;
@@ -613,6 +631,7 @@ fn extract_rustc_info(strings: &[String]) -> (Option<String>, Option<String>) {
     let re_commit = Regex::new(r"\(([0-9a-f]{9,40})\s+\d{4}-\d{2}-\d{2}\)").unwrap();
     let mut version = None;
     let mut commit = None;
+
     for s in strings {
         if version.is_none() {
             if let Some(c) = re_ver.captures(s) {
@@ -631,6 +650,7 @@ fn extract_rustc_info(strings: &[String]) -> (Option<String>, Option<String>) {
 fn extract_dependencies_from_paths(strings: &[String]) -> HashSet<CrateInfo> {
     let mut deps = HashSet::new();
     let re = Regex::new(r"[\\/]([a-zA-Z][a-zA-Z0-9_-]{1,64})-(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)").unwrap();
+
     for s in strings {
         if s.contains(".cargo") || s.contains("registry") {
             for caps in re.captures_iter(s) {
@@ -650,6 +670,7 @@ fn extract_dependencies_from_paths(strings: &[String]) -> HashSet<CrateInfo> {
 fn extract_from_panic_messages(strings: &[String]) -> HashSet<CrateInfo> {
     let mut deps = HashSet::new();
     let re = Regex::new(r"\b([a-zA-Z][a-zA-Z0-9_-]{2,40})-(\d+\.\d+\.\d+)\b").unwrap();
+
     for s in strings {
         if s.contains("panicked") || s.contains(".rs:") {
             for caps in re.captures_iter(s) {
@@ -666,6 +687,7 @@ fn extract_from_panic_messages(strings: &[String]) -> HashSet<CrateInfo> {
 fn extract_iocs(strings: &[String]) -> Vec<String> {
     let mut iocs = Vec::new();
     let mut seen = HashSet::new();
+
     let ip_re = Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
     let url_re = Regex::new(r#"https?://[^\s"'<>]+"#).unwrap();
     let domain_re = Regex::new(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|ru|cn|xyz|top|info|biz|online)\b").unwrap();
@@ -689,6 +711,7 @@ fn extract_iocs(strings: &[String]) -> Vec<String> {
                 iocs.push(format!("Domain: {}", domain));
             }
         }
+
         let lower = s.to_lowercase();
         if lower.contains("hkey_") || lower.contains("software\\") {
             if seen.insert(s.clone()) {
@@ -701,6 +724,7 @@ fn extract_iocs(strings: &[String]) -> Vec<String> {
             }
         }
     }
+
     iocs.into_iter().take(15).collect()
 }
 
@@ -739,6 +763,8 @@ fn print_report(report: &AnalysisReport) {
     if let Some(p) = &report.packer_hint {
         println!("{}  {}", "Packer/Compiler".bold().white(), p.yellow());
     }
+
+    // Resources line
     if report.has_resources {
         let res_info = match report.resource_size {
             Some(sz) => format!("Yes ({} bytes)", sz),
@@ -746,6 +772,7 @@ fn print_report(report: &AnalysisReport) {
         };
         println!("{}  {}", "Resources".bold().white(), res_info.cyan());
     }
+
     if let Some(ov) = report.overlay_size {
         println!("{}  {} bytes", "Overlay".bold().white(), ov);
     }
@@ -758,6 +785,7 @@ fn print_report(report: &AnalysisReport) {
     };
 
     let border = "─".repeat(64);
+
     match color {
         "red" => {
             println!("{}", format!("┌{}┐", border).red());

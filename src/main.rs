@@ -257,12 +257,13 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 entry_point = Some(format!("0x{:08X}", opt.standard_fields.address_of_entry_point));
 
                 // Resource Detection
-                if let Some(data_dir) = opt.data_directories.get(2) {
-                    if data_dir.virtual_address > 0 && data_dir.size > 0 {
-                        has_resources = true;
-                        resource_size = Some(data_dir.size);
-                    }
-                }
+                if let Some(Some((_, dir))) = opt.data_directories.data_directories.get(2) {
+    if dir.virtual_address > 0 && dir.size > 0 {
+        // ... biarkan kode di dalam sini tetap sama ...
+        resource_size = Some(dir.size);
+    }
+}
+
             }
 
             section_count = pe.sections.len();

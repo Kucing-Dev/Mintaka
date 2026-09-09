@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/caf10e99-1ba3-489f-a9e2-93dc8c19eeab" alt="logo mintaka" width="40%" />
+</p>
+
 
 # Mintaka
 

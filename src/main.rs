@@ -53,6 +53,7 @@ struct AnalysisReport {
     iocs: Vec<String>,
     has_resources: bool,
     resource_size: Option<u32>,
+    version_info: Vec<String>, // <-- NEW
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -96,10 +97,9 @@ fn save_csv_file(reports: &[AnalysisReport]) -> Result<()> {
     let mut file = File::create(filename)
         .with_context(|| format!("Failed to create {}", filename))?;
 
-    // Header
     writeln!(
         file,
-        "file,size,sha256,format,architecture,risk_score,risk_level,is_rust,packer,resources,entropy,sections"
+        "file,size,sha256,format,architecture,risk_score,risk_level,is_rust,packer,resources,entropy,sections,version_info"
     )?;
 
     for r in reports {
@@ -119,6 +119,12 @@ fn save_csv_file(reports: &[AnalysisReport]) -> Result<()> {
             "No".to_string()
         };
 
+        let version = if r.version_info.is_empty() {
+            "-".to_string()
+        } else {
+            r.version_info.join(" | ")
+        };
+
         let safe = |s: &str| {
             if s.contains(',') || s.contains('"') || s.contains('\n') {
                 format!("\"{}\"", s.replace('"', "\"\""))
@@ -129,7 +135,7 @@ fn save_csv_file(reports: &[AnalysisReport]) -> Result<()> {
 
         writeln!(
             file,
-            "{},{},{},{},{},{},{},{},{},{},{:.2},{}",
+            "{},{},{},{},{},{},{},{},{},{},{:.2},{},{}",
             safe(&name),
             r.file_size,
             r.sha256,
@@ -141,7 +147,8 @@ fn save_csv_file(reports: &[AnalysisReport]) -> Result<()> {
             safe(&packer),
             safe(&resources),
             r.file_entropy,
-            r.section_count
+            r.section_count,
+            safe(&version)
         )?;
     }
 
@@ -196,11 +203,10 @@ fn mass_scan(dir: &Path, json_output: bool, csv_output: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Normal table output
     println!("{}", "═".repeat(100).bright_cyan());
     println!(
         "{}",
-        format!("{:^100}", "MINTAKA v0.8 - Mass Scan Mode")
+        format!("{:^100}", "MINTAKA v0.9 - Mass Scan Mode")
             .bright_cyan()
             .bold()
     );
@@ -456,10 +462,13 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
         _ => ("Unknown".to_string(), None),
     };
 
-    let strings = extract_strings(data, 5);
+    let strings = extract_strings(data, 4);
     let is_rust = detect_rust(&strings, data);
     let (rustc_version, rustc_commit_hash) = extract_rustc_info(&strings);
     let packer_hint = detect_packer_and_compiler(&sections_info, &strings, is_rust);
+
+    // ===== NEW: Version Info Extraction =====
+    let version_info = extract_version_info(&strings);
 
     let mut deps = extract_dependencies_from_paths(&strings);
     for d in extract_from_panic_messages(&strings) {
@@ -591,7 +600,57 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
         iocs,
         has_resources,
         resource_size,
+        version_info,
     })
+}
+
+// ====================== NEW: Version Info ======================
+
+fn extract_version_info(strings: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    // Common VERSION_INFO keys
+    let keys = [
+        "FileDescription",
+        "CompanyName",
+        "ProductName",
+        "FileVersion",
+        "ProductVersion",
+        "OriginalFilename",
+        "LegalCopyright",
+        "InternalName",
+        "LegalTrademarks",
+    ];
+
+    for s in strings {
+        for key in &keys {
+            // Look for patterns like: FileDescription ... value
+            // or just the key followed by readable text
+            if s.contains(key) {
+                let cleaned = s.trim();
+                if cleaned.len() > key.len() + 2 && cleaned.len() < 120 {
+                    let entry = format!("{}: {}", key, cleaned.replace(key, "").trim());
+                    if seen.insert(entry.clone()) {
+                        result.push(entry);
+                    }
+                }
+            }
+        }
+    }
+
+    // Also try to catch common version patterns directly
+    let ver_re = Regex::new(r"(?i)(fileversion|productversion)[\s\x00]*([\d\.]+)").unwrap();
+    for s in strings {
+        if let Some(caps) = ver_re.captures(s) {
+            let entry = format!("{}: {}", &caps[1], &caps[2]);
+            if seen.insert(entry.clone()) {
+                result.push(entry);
+            }
+        }
+    }
+
+    result.into_iter().take(10).collect()
 }
 
 // ====================== HELPERS ======================
@@ -874,7 +933,7 @@ fn print_report(report: &AnalysisReport) {
     println!("{}", "═".repeat(width).bright_cyan());
     println!(
         "{}",
-        format!("{:^width$}", "MINTAKA v0.8", width = width)
+        format!("{:^width$}", "MINTAKA v0.9", width = width)
             .bright_cyan()
             .bold()
     );
@@ -909,7 +968,7 @@ fn print_report(report: &AnalysisReport) {
         println!("{}  {}", "Packer/Compiler".bold().white(), p.yellow());
     }
 
-    // Resources always shown
+    // Resources
     let res_info = if report.has_resources {
         match report.resource_size {
             Some(sz) => format!("Yes ({} bytes)", sz).cyan().to_string(),
@@ -924,6 +983,15 @@ fn print_report(report: &AnalysisReport) {
         println!("{}  {} bytes", "Overlay".bold().white(), ov);
     }
     println!();
+
+    // ===== NEW: Version Info =====
+    if !report.version_info.is_empty() {
+        println!("{}", "Version Info".bold().white());
+        for v in &report.version_info {
+            println!("  • {}", v);
+        }
+        println!();
+    }
 
     let (status_display, color) = match report.risk_level.as_str() {
         "HIGH RISK" => ("[HIGH RISK]".red().bold().to_string(), "red"),

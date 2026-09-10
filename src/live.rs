@@ -119,11 +119,103 @@ pub fn scan_live_processes(
             risk_score,
             risk_level,
             indicators,
+            tree_prefix: String::new(),
+            depth: 0,
         });
     }
 
+    // Build process tree hierarchy & prefixes
+    build_process_tree_hierarchy(&mut reports);
+
     reports.sort_by(|a, b| b.risk_score.cmp(&a.risk_score));
     Ok(reports)
+}
+
+fn build_process_tree_hierarchy(reports: &mut Vec<LiveProcessReport>) {
+    let pids: HashSet<u32> = reports.iter().map(|r| r.pid).collect();
+    let mut children_map: HashMap<Option<u32>, Vec<u32>> = HashMap::new();
+
+    for r in reports.iter() {
+        let parent = match r.parent_pid {
+            Some(ppid) if pids.contains(&ppid) => Some(ppid),
+            _ => None,
+        };
+        children_map.entry(parent).or_default().push(r.pid);
+    }
+
+    let mut report_map: HashMap<u32, LiveProcessReport> = reports.drain(..).map(|r| (r.pid, r)).collect();
+    let mut ordered = Vec::new();
+
+    if let Some(roots) = children_map.get(&None) {
+        let root_pids = roots.clone();
+        for (i, root_pid) in root_pids.iter().enumerate() {
+            let is_last = i == root_pids.len() - 1;
+            traverse_tree(
+                *root_pid,
+                "",
+                is_last,
+                0,
+                &children_map,
+                &mut report_map,
+                &mut ordered,
+            );
+        }
+    }
+
+    // Drain remaining orphans
+    for (_, r) in report_map {
+        ordered.push(r);
+    }
+
+    *reports = ordered;
+}
+
+fn traverse_tree(
+    pid: u32,
+    prefix: &str,
+    is_last: bool,
+    depth: usize,
+    children_map: &HashMap<Option<u32>, Vec<u32>>,
+    report_map: &mut HashMap<u32, LiveProcessReport>,
+    ordered: &mut Vec<LiveProcessReport>,
+) {
+    if let Some(mut report) = report_map.remove(&pid) {
+        let current_prefix = if depth == 0 {
+            "".to_string()
+        } else if is_last {
+            format!("{}└── ", prefix)
+        } else {
+            format!("{}├── ", prefix)
+        };
+
+        report.tree_prefix = current_prefix;
+        report.depth = depth;
+        ordered.push(report);
+
+        if let Some(children) = children_map.get(&Some(pid)) {
+            let child_pids = children.clone();
+            let child_prefix = if depth == 0 {
+                "".to_string()
+            } else if is_last {
+                format!("{}    ", prefix)
+            } else {
+                format!("{}│   ", prefix)
+            };
+
+            for (i, child_pid) in child_pids.iter().enumerate() {
+                let last_child = i == child_pids.len() - 1;
+                traverse_tree(
+                    *child_pid,
+                    &child_prefix,
+                    last_child,
+                    depth + 1,
+                    children_map,
+                    report_map,
+                    ordered,
+                );
+            }
+        }
+    }
 }
 
 fn get_cached_static_analysis(path: &Path) -> Option<AnalysisReport> {

@@ -102,4 +102,6 @@ pub struct LiveProcessReport {
     pub risk_score: u32,
     pub risk_level: String,
     pub indicators: Vec<String>,
+    pub tree_prefix: String,
+    pub depth: usize,
 }

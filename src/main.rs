@@ -189,7 +189,6 @@ fn mass_scan(dir: &Path, json_output: bool, csv_output: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Normal table output
     println!("{}", "═".repeat(100).bright_cyan());
     println!(
         "{}",
@@ -323,8 +322,9 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                     opt.standard_fields.address_of_entry_point
                 ));
 
-                // ===== Resource Detection (Fixed for your goblin version) =====
-                if let Some(data_dir) = opt.data_directories.data_directories.get(2) {
+                // ===== Resource Detection (Fixed) =====
+                // data_directories.get(2) returns Option<(usize, DataDirectory)>
+                if let Some(Some((_, data_dir))) = opt.data_directories.data_directories.get(2) {
                     if data_dir.virtual_address > 0 && data_dir.size > 0 {
                         has_resources = true;
                         resource_size = Some(data_dir.size);

@@ -7,7 +7,8 @@ use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -21,7 +22,7 @@ struct Args {
     #[arg(long)]
     json: bool,
 
-    /// Output as CSV (especially useful for mass scan)
+    /// Save result as CSV file (mintaka_report.csv)
     #[arg(long)]
     csv: bool,
 }
@@ -82,8 +83,7 @@ fn main() -> Result<()> {
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else if args.csv {
-            print_csv_header();
-            print_csv_row(&report);
+            save_csv_file(&[report])?;
         } else {
             print_report(&report);
         }
@@ -91,52 +91,62 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn print_csv_header() {
-    println!(
+fn save_csv_file(reports: &[AnalysisReport]) -> Result<()> {
+    let filename = "mintaka_report.csv";
+    let mut file = File::create(filename)
+        .with_context(|| format!("Failed to create {}", filename))?;
+
+    // Header
+    writeln!(
+        file,
         "file,size,sha256,format,architecture,risk_score,risk_level,is_rust,packer,resources,entropy,sections"
-    );
-}
+    )?;
 
-fn print_csv_row(r: &AnalysisReport) {
-    let filename = Path::new(&r.file)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| r.file.clone());
+    for r in reports {
+        let name = Path::new(&r.file)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| r.file.clone());
 
-    let arch = r.architecture.clone().unwrap_or_else(|| "-".to_string());
-    let packer = r.packer_hint.clone().unwrap_or_else(|| "-".to_string());
-    let resources = if r.has_resources {
-        match r.resource_size {
-            Some(sz) => format!("Yes ({} bytes)", sz),
-            None => "Yes".to_string(),
-        }
-    } else {
-        "No".to_string()
-    };
-
-    let safe = |s: &str| {
-        if s.contains(',') || s.contains('"') {
-            format!("\"{}\"", s.replace('"', "\"\""))
+        let arch = r.architecture.clone().unwrap_or_else(|| "-".to_string());
+        let packer = r.packer_hint.clone().unwrap_or_else(|| "-".to_string());
+        let resources = if r.has_resources {
+            match r.resource_size {
+                Some(sz) => format!("Yes ({} bytes)", sz),
+                None => "Yes".to_string(),
+            }
         } else {
-            s.to_string()
-        }
-    };
+            "No".to_string()
+        };
 
-    println!(
-        "{},{},{},{},{},{},{},{},{},{},{:.2},{}",
-        safe(&filename),
-        r.file_size,
-        r.sha256,
-        r.format,
-        arch,
-        r.risk_score,
-        r.risk_level,
-        if r.is_rust { "YES" } else { "NO" },
-        safe(&packer),
-        safe(&resources),
-        r.file_entropy,
-        r.section_count
-    );
+        let safe = |s: &str| {
+            if s.contains(',') || s.contains('"') || s.contains('\n') {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            } else {
+                s.to_string()
+            }
+        };
+
+        writeln!(
+            file,
+            "{},{},{},{},{},{},{},{},{},{},{:.2},{}",
+            safe(&name),
+            r.file_size,
+            r.sha256,
+            r.format,
+            arch,
+            r.risk_score,
+            r.risk_level,
+            if r.is_rust { "YES" } else { "NO" },
+            safe(&packer),
+            safe(&resources),
+            r.file_entropy,
+            r.section_count
+        )?;
+    }
+
+    println!("{}  {}", "CSV report saved to:".green().bold(), filename);
+    Ok(())
 }
 
 fn mass_scan(dir: &Path, json_output: bool, csv_output: bool) -> Result<()> {
@@ -182,13 +192,11 @@ fn mass_scan(dir: &Path, json_output: bool, csv_output: bool) -> Result<()> {
     }
 
     if csv_output {
-        print_csv_header();
-        for r in &reports {
-            print_csv_row(r);
-        }
+        save_csv_file(&reports)?;
         return Ok(());
     }
 
+    // Normal table output
     println!("{}", "═".repeat(100).bright_cyan());
     println!(
         "{}",
@@ -322,8 +330,7 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                     opt.standard_fields.address_of_entry_point
                 ));
 
-                // ===== Resource Detection (Fixed) =====
-                // data_directories.get(2) returns Option<(usize, DataDirectory)>
+                // Resource Detection (correct for your goblin version)
                 if let Some(Some((_, data_dir))) = opt.data_directories.data_directories.get(2) {
                     if data_dir.virtual_address > 0 && data_dir.size > 0 {
                         has_resources = true;
@@ -388,7 +395,7 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 }
             }
 
-            // Fallback: cek section .rsrc
+            // Fallback resource detection via section name
             if !has_resources {
                 for sec in &sections_info {
                     let lname = sec.name.to_lowercase();
@@ -902,7 +909,7 @@ fn print_report(report: &AnalysisReport) {
         println!("{}  {}", "Packer/Compiler".bold().white(), p.yellow());
     }
 
-    // Resources selalu ditampilkan
+    // Resources always shown
     let res_info = if report.has_resources {
         match report.resource_size {
             Some(sz) => format!("Yes ({} bytes)", sz).cyan().to_string(),

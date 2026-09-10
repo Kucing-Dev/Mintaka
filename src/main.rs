@@ -20,6 +20,10 @@ struct Args {
     /// Output as JSON
     #[arg(long)]
     json: bool,
+
+    /// Output as CSV (especially useful for mass scan)
+    #[arg(long)]
+    csv: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -69,7 +73,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     if args.path.is_dir() {
-        mass_scan(&args.path, args.json)?;
+        mass_scan(&args.path, args.json, args.csv)?;
     } else {
         let data = fs::read(&args.path)
             .with_context(|| format!("Failed to read file: {}", args.path.display()))?;
@@ -77,6 +81,9 @@ fn main() -> Result<()> {
 
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
+        } else if args.csv {
+            print_csv_header();
+            print_csv_row(&report);
         } else {
             print_report(&report);
         }
@@ -84,17 +91,56 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn mass_scan(dir: &Path, json_output: bool) -> Result<()> {
-    println!("{}", "═".repeat(100).bright_cyan());
+fn print_csv_header() {
     println!(
-        "{}",
-        format!("{:^100}", "MINTAKA v0.7 - Mass Scan Mode")
-            .bright_cyan()
-            .bold()
+        "file,size,sha256,format,architecture,risk_score,risk_level,is_rust,packer,resources,entropy,sections"
     );
-    println!("{}", "═".repeat(100).bright_cyan());
-    println!();
+}
 
+fn print_csv_row(r: &AnalysisReport) {
+    let filename = Path::new(&r.file)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| r.file.clone());
+
+    let arch = r.architecture.clone().unwrap_or_else(|| "-".to_string());
+    let packer = r.packer_hint.clone().unwrap_or_else(|| "-".to_string());
+    let resources = if r.has_resources {
+        match r.resource_size {
+            Some(sz) => format!("Yes ({} bytes)", sz),
+            None => "Yes".to_string(),
+        }
+    } else {
+        "No".to_string()
+    };
+
+    // Escape commas and quotes for CSV
+    let safe = |s: &str| {
+        if s.contains(',') || s.contains('"') {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    };
+
+    println!(
+        "{},{},{},{},{},{},{},{},{},{},{:.2},{}",
+        safe(&filename),
+        r.file_size,
+        r.sha256,
+        r.format,
+        arch,
+        r.risk_score,
+        r.risk_level,
+        if r.is_rust { "YES" } else { "NO" },
+        safe(&packer),
+        safe(&resources),
+        r.file_entropy,
+        r.section_count
+    );
+}
+
+fn mass_scan(dir: &Path, json_output: bool, csv_output: bool) -> Result<()> {
     let mut reports: Vec<AnalysisReport> = Vec::new();
     let mut total = 0u32;
     let mut high = 0u32;
@@ -129,10 +175,32 @@ fn mass_scan(dir: &Path, json_output: bool) -> Result<()> {
         }
     }
 
+    // Sort by risk score (highest first)
+    reports.sort_by(|a, b| b.risk_score.cmp(&a.risk_score));
+
     if json_output {
         println!("{}", serde_json::to_string_pretty(&reports)?);
         return Ok(());
     }
+
+    if csv_output {
+        print_csv_header();
+        for r in &reports {
+            print_csv_row(r);
+        }
+        return Ok(());
+    }
+
+    // Normal table output
+    println!("{}", "═".repeat(100).bright_cyan());
+    println!(
+        "{}",
+        format!("{:^100}", "MINTAKA v0.8 - Mass Scan Mode")
+            .bright_cyan()
+            .bold()
+    );
+    println!("{}", "═".repeat(100).bright_cyan());
+    println!();
 
     println!(
         "{:<28} {:>7} {:>6} {:<12} {:<4} {}",
@@ -144,8 +212,6 @@ fn mass_scan(dir: &Path, json_output: bool) -> Result<()> {
         "Packer".bold()
     );
     println!("{}", "─".repeat(100));
-
-    reports.sort_by(|a, b| b.risk_score.cmp(&a.risk_score));
 
     for r in &reports {
         let filename = Path::new(&r.file)
@@ -257,13 +323,12 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 entry_point = Some(format!("0x{:08X}", opt.standard_fields.address_of_entry_point));
 
                 // Resource Detection
-                if let Some(Some((_, dir))) = opt.data_directories.data_directories.get(2) {
-    if dir.virtual_address > 0 && dir.size > 0 {
-        // ... biarkan kode di dalam sini tetap sama ...
-        resource_size = Some(dir.size);
-    }
-}
-
+                if let Some(data_dir) = opt.data_directories.get(2) {
+                    if data_dir.virtual_address > 0 && data_dir.size > 0 {
+                        has_resources = true;
+                        resource_size = Some(data_dir.size);
+                    }
+                }
             }
 
             section_count = pe.sections.len();
@@ -311,7 +376,7 @@ fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
                 }
             }
 
-            // Fallback: cek section .rsrc
+            // Fallback resource detection
             if !has_resources {
                 for sec in &sections_info {
                     let lname = sec.name.to_lowercase();
@@ -576,7 +641,9 @@ fn detect_packer_and_compiler(
 }
 
 fn calculate_entropy(data: &[u8]) -> f64 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     let mut freq = [0u64; 256];
     for &b in data {
         freq[b as usize] += 1;
@@ -744,7 +811,7 @@ fn print_report(report: &AnalysisReport) {
     let width = 66;
 
     println!("{}", "═".repeat(width).bright_cyan());
-    println!("{}", format!("{:^width$}", "MINTAKA v0.7", width = width).bright_cyan().bold());
+    println!("{}", format!("{:^width$}", "MINTAKA v0.8", width = width).bright_cyan().bold());
     println!("{}", format!("{:^width$}", "Static Analysis & Triage for Rust Binaries", width = width).cyan());
     println!("{}", "═".repeat(width).bright_cyan());
     println!();

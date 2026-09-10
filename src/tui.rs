@@ -27,6 +27,8 @@ pub struct TuiApp {
     pub filter: String,
     pub is_filtering: bool,
     pub show_tree_view: bool,
+    pub active_panel: usize, // 0 = Process List Table, 1 = Process Inspector Panel
+    pub detail_scroll: u16,
     pub last_refresh: Instant,
     pub refresh_interval: Duration,
 }
@@ -43,6 +45,8 @@ impl TuiApp {
             filter: String::new(),
             is_filtering: false,
             show_tree_view: false,
+            active_panel: 0,
+            detail_scroll: 0,
             last_refresh: Instant::now() - Duration::from_secs(100), // Force immediate scan on startup
             refresh_interval: Duration::from_secs(interval_secs),
         }
@@ -105,6 +109,7 @@ impl TuiApp {
             None => 0,
         };
         self.table_state.select(Some(i));
+        self.detail_scroll = 0;
     }
 
     pub fn previous(&mut self) {
@@ -122,6 +127,15 @@ impl TuiApp {
             None => 0,
         };
         self.table_state.select(Some(i));
+        self.detail_scroll = 0;
+    }
+
+    pub fn scroll_detail_down(&mut self, amount: u16) {
+        self.detail_scroll = self.detail_scroll.saturating_add(amount);
+    }
+
+    pub fn scroll_detail_up(&mut self, amount: u16) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(amount);
     }
 }
 
@@ -200,8 +214,25 @@ fn main_loop<B: ratatui::backend::Backend>(
                             app.show_tree_view = !app.show_tree_view;
                             app.apply_filter_and_sort();
                         }
-                        KeyCode::Down | KeyCode::Char('j') => app.next(),
-                        KeyCode::Up | KeyCode::Char('k') => app.previous(),
+                        KeyCode::Tab => {
+                            app.active_panel = (app.active_panel + 1) % 2;
+                        }
+                        KeyCode::PageDown | KeyCode::Char('d') => app.scroll_detail_down(5),
+                        KeyCode::PageUp | KeyCode::Char('u') => app.scroll_detail_up(5),
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if app.active_panel == 1 {
+                                app.scroll_detail_down(2);
+                            } else {
+                                app.next();
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if app.active_panel == 1 {
+                                app.scroll_detail_up(2);
+                            } else {
+                                app.previous();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -328,6 +359,12 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
         format!(" Processes sorted by Risk ({}) ", app.processes.len())
     };
 
+    let table_border_style = if app.active_panel == 0 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
     let table = Table::new(
         rows,
         [
@@ -354,7 +391,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(table_border_style)
             .title(title_mode),
     )
     .highlight_style(
@@ -548,13 +585,26 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
         vec![Line::from("Select a process to view details")]
     };
 
+    let inspector_border_style = if app.active_panel == 1 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
+    let inspector_title = if app.detail_scroll > 0 {
+        format!(" Process Inspector (Line {}) [Tab to switch focus] ", app.detail_scroll + 1)
+    } else {
+        " Process Inspector [Tab to switch focus] ".to_string()
+    };
+
     let detail_paragraph = Paragraph::new(detail_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" Process Inspector "),
+                .border_style(inspector_border_style)
+                .title(inspector_title),
         )
+        .scroll((app.detail_scroll, 0))
         .wrap(Wrap { trim: true });
 
     f.render_widget(detail_paragraph, main_chunks[1]);
@@ -567,24 +617,24 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
             Span::styled("  (Press Enter to submit, Esc to cancel)", Style::default().fg(Color::DarkGray)),
         ]
     } else {
+        let focus_label = if app.active_panel == 0 { "Table (Scroll Proc)" } else { "Inspector (Scroll Info)" };
         vec![
             Span::styled(" [q/Esc] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw("Quit  "),
+            Span::styled(" [Tab] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("Focus: {}  ", focus_label), Style::default().fg(Color::Yellow)),
             Span::styled(" [↑/↓/j/k] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("Navigate  "),
+            Span::raw("Scroll  "),
+            Span::styled(" [PgUp/PgDn] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("Scroll Detail  "),
             Span::styled(" [t] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(if app.show_tree_view { "Flat View  " } else { "Tree View  " }),
             Span::styled(" [/] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(if app.filter.is_empty() { "Filter  " } else { "Change Filter  " }),
             Span::styled(" [c] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("Clear Filter  "),
+            Span::raw("Clear  "),
             Span::styled(" [r] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw("Refresh  "),
-            if !app.filter.is_empty() {
-                Span::styled(format!("│ Filter: \"{}\"", app.filter), Style::default().fg(Color::Yellow))
-            } else {
-                Span::raw("")
-            },
         ]
     };
 

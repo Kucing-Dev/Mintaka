@@ -1,9 +1,9 @@
 use crate::types::{VtIpReputation, VtProcessReport};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,9 +15,10 @@ pub struct VtCacheData {
 
 pub struct VtClient {
     api_key: String,
-    last_request: Mutex<Option<Instant>>,
+    last_request: Arc<Mutex<Option<Instant>>>,
     min_interval: Duration,
-    cache: Mutex<VtCacheData>,
+    cache: Arc<Mutex<VtCacheData>>,
+    pending_requests: Arc<Mutex<HashSet<String>>>,
     cache_path: Option<PathBuf>,
 }
 
@@ -45,36 +46,16 @@ impl VtClient {
 
         Self {
             api_key,
-            last_request: Mutex::new(None),
+            last_request: Arc::new(Mutex::new(None)),
             min_interval: Duration::from_secs(15), // Rate-limit for free tier (4 req/min)
-            cache: Mutex::new(cache_data),
+            cache: Arc::new(Mutex::new(cache_data)),
+            pending_requests: Arc::new(Mutex::new(HashSet::new())),
             cache_path,
         }
     }
 
-    fn save_cache(&self) {
-        if let Some(ref path) = self.cache_path {
-            if let Ok(guard) = self.cache.lock() {
-                if let Ok(json) = serde_json::to_string_pretty(&*guard) {
-                    let _ = fs::write(path, json);
-                }
-            }
-        }
-    }
-
-    fn throttle(&self) {
-        let mut last_req = self.last_request.lock().unwrap();
-        if let Some(instant) = *last_req {
-            let elapsed = instant.elapsed();
-            if elapsed < self.min_interval {
-                thread::sleep(self.min_interval - elapsed);
-            }
-        }
-        *last_req = Some(Instant::now());
-    }
-
     pub fn check_file_hash(&self, sha256: &str) -> Option<(u32, u32)> {
-        // Check cache first
+        // Return from cache immediately
         {
             let guard = self.cache.lock().unwrap();
             if let Some(hit) = guard.file_cache.get(sha256) {
@@ -82,16 +63,37 @@ impl VtClient {
             }
         }
 
-        self.throttle();
+        // Queue background fetch if not already pending
+        {
+            let mut pending = self.pending_requests.lock().unwrap();
+            if !pending.insert(sha256.to_string()) {
+                return None; // Already queued
+            }
+        }
 
-        let url = format!("https://www.virustotal.com/api/v3/files/{}", sha256);
-        let resp = ureq::get(&url)
-            .set("x-api-key", &self.api_key)
-            .call();
+        let api_key = self.api_key.clone();
+        let hash_owned = sha256.to_string();
+        let cache = Arc::clone(&self.cache);
+        let last_request = Arc::clone(&self.last_request);
+        let min_interval = self.min_interval;
+        let cache_path = self.cache_path.clone();
 
-        match resp {
-            Ok(r) => {
-                if let Ok(json) = r.into_json::<serde_json::Value>() {
+        thread::spawn(move || {
+            // Throttle rate limit in background thread
+            {
+                let mut last_req = last_request.lock().unwrap();
+                if let Some(instant) = *last_req {
+                    let elapsed = instant.elapsed();
+                    if elapsed < min_interval {
+                        thread::sleep(min_interval - elapsed);
+                    }
+                }
+                *last_req = Some(Instant::now());
+            }
+
+            let url = format!("https://www.virustotal.com/api/v3/files/{}", hash_owned);
+            if let Ok(resp) = ureq::get(&url).set("x-api-key", &api_key).call() {
+                if let Ok(json) = resp.into_json::<serde_json::Value>() {
                     let stats = &json["data"]["attributes"]["last_analysis_stats"];
                     let malicious = stats["malicious"].as_u64().unwrap_or(0) as u32;
                     let harmless = stats["harmless"].as_u64().unwrap_or(0) as u32;
@@ -103,26 +105,30 @@ impl VtClient {
 
                     let res = (positives, total);
                     {
-                        let mut guard = self.cache.lock().unwrap();
-                        guard.file_cache.insert(sha256.to_string(), res);
+                        let mut guard = cache.lock().unwrap();
+                        guard.file_cache.insert(hash_owned, res);
                     }
-                    self.save_cache();
-                    Some(res)
-                } else {
-                    None
+
+                    if let Some(ref path) = cache_path {
+                        if let Ok(guard) = cache.lock() {
+                            if let Ok(json_str) = serde_json::to_string_pretty(&*guard) {
+                                let _ = fs::write(path, json_str);
+                            }
+                        }
+                    }
                 }
             }
-            Err(_) => None,
-        }
+        });
+
+        None
     }
 
     pub fn check_ip(&self, ip: &str) -> Option<VtIpReputation> {
-        // Skip local or private IPs
         if ip.starts_with("127.") || ip.starts_with("10.") || ip.starts_with("192.168.") || ip == "0.0.0.0" {
             return None;
         }
 
-        // Check cache first
+        // Return from cache immediately
         {
             let guard = self.cache.lock().unwrap();
             if let Some(hit) = guard.ip_cache.get(ip) {
@@ -130,16 +136,37 @@ impl VtClient {
             }
         }
 
-        self.throttle();
+        // Queue background fetch if not already pending
+        {
+            let mut pending = self.pending_requests.lock().unwrap();
+            if !pending.insert(ip.to_string()) {
+                return None; // Already queued
+            }
+        }
 
-        let url = format!("https://www.virustotal.com/api/v3/ip_addresses/{}", ip);
-        let resp = ureq::get(&url)
-            .set("x-api-key", &self.api_key)
-            .call();
+        let api_key = self.api_key.clone();
+        let ip_owned = ip.to_string();
+        let cache = Arc::clone(&self.cache);
+        let last_request = Arc::clone(&self.last_request);
+        let min_interval = self.min_interval;
+        let cache_path = self.cache_path.clone();
 
-        match resp {
-            Ok(r) => {
-                if let Ok(json) = r.into_json::<serde_json::Value>() {
+        thread::spawn(move || {
+            // Throttle rate limit in background thread
+            {
+                let mut last_req = last_request.lock().unwrap();
+                if let Some(instant) = *last_req {
+                    let elapsed = instant.elapsed();
+                    if elapsed < min_interval {
+                        thread::sleep(min_interval - elapsed);
+                    }
+                }
+                *last_req = Some(Instant::now());
+            }
+
+            let url = format!("https://www.virustotal.com/api/v3/ip_addresses/{}", ip_owned);
+            if let Ok(resp) = ureq::get(&url).set("x-api-key", &api_key).call() {
+                if let Ok(json) = resp.into_json::<serde_json::Value>() {
                     let attrs = &json["data"]["attributes"];
                     let stats = &attrs["last_analysis_stats"];
                     let malicious = stats["malicious"].as_u64().unwrap_or(0) as u32;
@@ -148,7 +175,7 @@ impl VtClient {
                     let owner = attrs["as_owner"].as_str().map(|s| s.to_string());
 
                     let rep = VtIpReputation {
-                        ip: ip.to_string(),
+                        ip: ip_owned.clone(),
                         malicious_votes: malicious,
                         harmless_votes: harmless,
                         country,
@@ -156,17 +183,22 @@ impl VtClient {
                     };
 
                     {
-                        let mut guard = self.cache.lock().unwrap();
-                        guard.ip_cache.insert(ip.to_string(), rep.clone());
+                        let mut guard = cache.lock().unwrap();
+                        guard.ip_cache.insert(ip_owned, rep);
                     }
-                    self.save_cache();
-                    Some(rep)
-                } else {
-                    None
+
+                    if let Some(ref path) = cache_path {
+                        if let Ok(guard) = cache.lock() {
+                            if let Ok(json_str) = serde_json::to_string_pretty(&*guard) {
+                                let _ = fs::write(path, json_str);
+                            }
+                        }
+                    }
                 }
             }
-            Err(_) => None,
-        }
+        });
+
+        None
     }
 
     pub fn analyze_process_vt(

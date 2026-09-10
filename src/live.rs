@@ -383,15 +383,23 @@ fn get_cached_dns(ip_str: &str) -> Option<String> {
         }
     }
 
-    let hostname = if let Ok(ip) = IpAddr::from_str(ip_str) {
-        dns_lookup::lookup_addr(&ip).ok()
-    } else {
-        None
-    };
+    // Spawn non-blocking background DNS PTR lookup to prevent freezing startup/scan thread
+    let ip_owned = ip_str.to_string();
+    {
+        let mut cache = DNS_CACHE.lock().unwrap();
+        cache.insert(ip_owned.clone(), None);
+    }
 
-    let mut cache = DNS_CACHE.lock().unwrap();
-    cache.insert(ip_str.to_string(), hostname.clone());
-    hostname
+    std::thread::spawn(move || {
+        if let Ok(ip) = IpAddr::from_str(&ip_owned) {
+            if let Ok(hostname) = dns_lookup::lookup_addr(&ip) {
+                let mut cache = DNS_CACHE.lock().unwrap();
+                cache.insert(ip_owned, Some(hostname));
+            }
+        }
+    });
+
+    None
 }
 
 fn get_network_connections_by_pid() -> HashMap<u32, Vec<NetworkConnection>> {

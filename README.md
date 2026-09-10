@@ -45,6 +45,10 @@ It helps malware analysts quickly triage suspicious binaries by extracting key i
 ### Mass Scan Mode
 Scan an entire directory of samples and get a clean summary table sorted by risk score.
 
+### Export Options
+- **JSON** output (`--json`)
+- **CSV** export (`--csv`) → saves result to `mintaka_report.csv` (can be opened in LibreOffice / Excel)
+
 ### Risk Scoring
 | Score     | Level            | Meaning                     |
 |-----------|------------------|-----------------------------|
@@ -81,6 +85,22 @@ Binary:
 ./mintaka ./malware_samples/
 ```
 
+### Save as CSV (recommended for reports)
+```bash
+# Single file
+./mintaka sample.exe --csv
+
+# Mass scan
+./mintaka ./malware_samples/ --csv
+```
+
+The result will be saved as a file.:
+```text
+mintaka_report.csv
+```
+
+This file can be opened directly using **LibreOffice Calc** or **Microsoft Excel**.
+
 ### JSON Output
 ```bash
 ./mintaka sample.exe --json
@@ -95,7 +115,7 @@ Binary:
 
 ```text
 ══════════════════════════════════════════════════════════════════
-                         MINTAKA v0.7
+                         MINTAKA v0.8
             Static Analysis & Triage for Rust Binaries
 ══════════════════════════════════════════════════════════════════
 
@@ -110,7 +130,6 @@ Compiled          2026-04-14 14:29:15 UTC
 Entry Point       0x00005000
 Packer/Compiler   Unknown Packer / Custom Protector (RWX)
 Resources         No
-Overlay           -
 
 ┌────────────────────────────────────────────────────────────────┐
 │  Status      : [LOW]                                           │
@@ -136,12 +155,26 @@ File                           Size  Score Risk         Rust Packer
 malware_upx.exe               24.0KB   100 HIGH RISK    NO   UPX
 malware_https.exe              9.2KB    47 NEEDS REVIEW NO   Unknown Packer...
 shell_staged.exe               7.1KB    35 LOW          NO   Unknown Packer...
-malware_standard.exe           5.1KB    18 LOW          NO   -
 
-Total: 4
+Total: 3
 HIGH RISK: 1
 NEEDS REVIEW: 1
-LOW: 2
+LOW: 1
+```
+
+### CSV Export
+
+After running with the `--csv` flag, a message will appear:
+
+```text
+CSV report saved to: mintaka_report.csv
+```
+
+Sample CSV file content:
+
+```csv
+file,size,sha256,format,architecture,risk_score,risk_level,is_rust,packer,resources,entropy,sections
+malware_upx.exe,24576,abc123...,PE,x86,100,HIGH RISK,NO,UPX,No,7.85,3
 ```
 
 ---
@@ -151,6 +184,7 @@ LOW: 2
 - Not all malware contains **Resources**. Many modern / packed / generated samples deliberately omit them.
 - Best results are obtained on Windows PE files.
 - This is a **static analysis** tool only (no dynamic execution).
+- CSV file is always named `mintaka_report.csv` and saved in the current working directory.
 
 ---
 
@@ -166,11 +200,13 @@ LOW: 2
 - [x] Risk scoring
 - [x] Rust binary detection
 - [x] Mass Scan Mode
+- [x] CSV export to file
 
 ### Planned
 - [ ] Better resource parsing (version info, icons)
 - [ ] Optional YARA support
-- [ ] HTML / CSV report export
+- [ ] HTML report export
+- [ ] Custom output filename for CSV
 - [ ] Entry point disassembly preview
 
 ---
@@ -182,4 +218,5 @@ MIT License
 
 
 **Mintaka** — Fast static triage for modern malware analysis.
+
 

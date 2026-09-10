@@ -213,10 +213,11 @@ pub fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
         _ => ("Unknown".to_string(), None),
     };
 
-    let strings = extract_strings(data, 5);
+    let strings = extract_strings(data, 4);
     let is_rust = detect_rust(&strings, data);
     let (rustc_version, rustc_commit_hash) = extract_rustc_info(&strings);
     let packer_hint = detect_packer_and_compiler(&sections_info, &strings, is_rust);
+    let version_info = extract_version_info(&strings);
 
     let mut deps = extract_dependencies_from_paths(&strings);
     for d in extract_from_panic_messages(&strings) {
@@ -350,6 +351,7 @@ pub fn analyze(path: &Path, data: &[u8]) -> Result<AnalysisReport> {
         resource_size,
         is_signed,
         signature_publisher,
+        version_info,
     })
 }
 
@@ -393,6 +395,49 @@ pub fn extract_strings(data: &[u8], min_len: usize) -> Vec<String> {
         }
     }
     result
+}
+
+fn extract_version_info(strings: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+
+    let keys = [
+        "FileDescription",
+        "CompanyName",
+        "ProductName",
+        "FileVersion",
+        "ProductVersion",
+        "OriginalFilename",
+        "LegalCopyright",
+        "InternalName",
+        "LegalTrademarks",
+    ];
+
+    for s in strings {
+        for key in &keys {
+            if s.contains(key) {
+                let cleaned = s.trim();
+                if cleaned.len() > key.len() + 2 && cleaned.len() < 120 {
+                    let entry = format!("{}: {}", key, cleaned.replace(key, "").trim());
+                    if seen.insert(entry.clone()) {
+                        result.push(entry);
+                    }
+                }
+            }
+        }
+    }
+
+    let ver_re = Regex::new(r"(?i)(fileversion|productversion)[\s\x00]*([\d\.]+)").unwrap();
+    for s in strings {
+        if let Some(caps) = ver_re.captures(s) {
+            let entry = format!("{}: {}", &caps[1], &caps[2]);
+            if seen.insert(entry.clone()) {
+                result.push(entry);
+            }
+        }
+    }
+
+    result.into_iter().take(10).collect()
 }
 
 fn detect_rust(strings: &[String], data: &[u8]) -> bool {

@@ -28,6 +28,7 @@ pub struct AnalysisReport {
     pub resource_size: Option<u32>,
     pub is_signed: bool,
     pub signature_publisher: Option<String>,
+    pub version_info: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -68,6 +68,14 @@ pub fn print_static_report(report: &AnalysisReport) {
     }
     println!();
 
+    if !report.version_info.is_empty() {
+        println!("{}", "Version Info".bold().white());
+        for v in &report.version_info {
+            println!("  • {}", v);
+        }
+        println!();
+    }
+
     let (status_display, color) = match report.risk_level.as_str() {
         "HIGH RISK" => ("[HIGH RISK]".red().bold().to_string(), "red"),
         "NEEDS REVIEW" => ("[NEEDS REVIEW]".yellow().bold().to_string(), "yellow"),
@@ -218,7 +226,7 @@ pub fn save_static_csv_file(reports: &[AnalysisReport]) -> Result<()> {
 
     writeln!(
         file,
-        "file,size,sha256,format,architecture,risk_score,risk_level,is_rust,packer,resources,entropy,sections"
+        "file,size,sha256,format,architecture,risk_score,risk_level,is_rust,packer,resources,entropy,sections,version_info"
     )?;
 
     for r in reports {
@@ -238,6 +246,12 @@ pub fn save_static_csv_file(reports: &[AnalysisReport]) -> Result<()> {
             "No".to_string()
         };
 
+        let version = if r.version_info.is_empty() {
+            "-".to_string()
+        } else {
+            r.version_info.join(" | ")
+        };
+
         let safe = |s: &str| {
             if s.contains(',') || s.contains('"') || s.contains('\n') {
                 format!("\"{}\"", s.replace('"', "\"\""))
@@ -248,7 +262,7 @@ pub fn save_static_csv_file(reports: &[AnalysisReport]) -> Result<()> {
 
         writeln!(
             file,
-            "{},{},{},{},{},{},{},{},{},{},{:.2},{}",
+            "{},{},{},{},{},{},{},{},{},{},{:.2},{},{}",
             safe(&name),
             r.file_size,
             r.sha256,
@@ -260,7 +274,8 @@ pub fn save_static_csv_file(reports: &[AnalysisReport]) -> Result<()> {
             safe(&packer),
             safe(&resources),
             r.file_entropy,
-            r.section_count
+            r.section_count,
+            safe(&version)
         )?;
     }
 

@@ -21,11 +21,14 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 
 pub struct TuiApp {
+    pub raw_processes: Vec<LiveProcessReport>,
     pub processes: Vec<LiveProcessReport>,
     pub table_state: TableState,
     pub filter: String,
     pub is_filtering: bool,
-    pub selected_tab: usize, // 0 = Overview/Processes, 1 = Process Details
+    pub show_tree_view: bool,
+    pub active_panel: usize, // 0 = Process List Table, 1 = Process Inspector Panel
+    pub detail_scroll: u16,
     pub last_refresh: Instant,
     pub refresh_interval: Duration,
 }
@@ -36,24 +39,33 @@ impl TuiApp {
         table_state.select(Some(0));
 
         Self {
+            raw_processes: Vec::new(),
             processes: Vec::new(),
             table_state,
             filter: String::new(),
             is_filtering: false,
-            selected_tab: 0,
-            last_refresh: Instant::now() - Duration::from_secs(100), // Force immediate scan
+            show_tree_view: false,
+            active_panel: 0,
+            detail_scroll: 0,
+            last_refresh: Instant::now() - Duration::from_secs(100), // Force immediate scan on startup
             refresh_interval: Duration::from_secs(interval_secs),
         }
     }
 
-    pub fn refresh_data(&mut self, vt_client: Option<&VtClient>) -> Result<()> {
-        let raw_processes = scan_live_processes(None, None, vt_client)?;
-        if self.filter.is_empty() {
-            self.processes = raw_processes;
+    pub fn fetch_system_processes(&mut self, vt_client: Option<&VtClient>) -> Result<()> {
+        self.raw_processes = scan_live_processes(None, None, vt_client)?;
+        self.apply_filter_and_sort();
+        self.last_refresh = Instant::now();
+        Ok(())
+    }
+
+    pub fn apply_filter_and_sort(&mut self) {
+        let mut filtered: Vec<LiveProcessReport> = if self.filter.is_empty() {
+            self.raw_processes.clone()
         } else {
             let query = self.filter.to_lowercase();
-            self.processes = raw_processes
-                .into_iter()
+            self.raw_processes
+                .iter()
                 .filter(|p| {
                     p.name.to_lowercase().contains(&query)
                         || p.pid.to_string().contains(&query)
@@ -62,8 +74,16 @@ impl TuiApp {
                             .map(|path| path.to_lowercase().contains(&query))
                             .unwrap_or(false)
                 })
-                .collect();
+                .cloned()
+                .collect()
+        };
+
+        if !self.show_tree_view {
+            // Sort by Risk Score descending in Flat mode
+            filtered.sort_by(|a, b| b.risk_score.cmp(&a.risk_score));
         }
+
+        self.processes = filtered;
 
         if self.processes.is_empty() {
             self.table_state.select(None);
@@ -72,9 +92,6 @@ impl TuiApp {
         {
             self.table_state.select(Some(0));
         }
-
-        self.last_refresh = Instant::now();
-        Ok(())
     }
 
     pub fn next(&mut self) {
@@ -92,6 +109,7 @@ impl TuiApp {
             None => 0,
         };
         self.table_state.select(Some(i));
+        self.detail_scroll = 0;
     }
 
     pub fn previous(&mut self) {
@@ -109,6 +127,15 @@ impl TuiApp {
             None => 0,
         };
         self.table_state.select(Some(i));
+        self.detail_scroll = 0;
+    }
+
+    pub fn scroll_detail_down(&mut self, amount: u16) {
+        self.detail_scroll = self.detail_scroll.saturating_add(amount);
+    }
+
+    pub fn scroll_detail_up(&mut self, amount: u16) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(amount);
     }
 }
 
@@ -121,7 +148,7 @@ pub fn run_interactive_tui(vt_key: Option<String>, refresh_interval: u64) -> Res
 
     let vt_client = vt_key.as_ref().map(|k| VtClient::new(k.clone()));
     let mut app = TuiApp::new(refresh_interval);
-    app.refresh_data(vt_client.as_ref())?;
+    app.fetch_system_processes(vt_client.as_ref())?;
 
     let res = main_loop(&mut terminal, &mut app, vt_client.as_ref());
 
@@ -139,31 +166,30 @@ fn main_loop<B: ratatui::backend::Backend>(
 ) -> Result<()> {
     loop {
         if app.last_refresh.elapsed() >= app.refresh_interval {
-            let _ = app.refresh_data(vt_client);
+            let _ = app.fetch_system_processes(vt_client);
         }
 
         terminal.draw(|f| draw_ui(f, app))?;
 
-        if event::poll(Duration::from_millis(200))? {
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if app.is_filtering {
                     match key.code {
                         KeyCode::Enter => {
                             app.is_filtering = false;
-                            let _ = app.refresh_data(vt_client);
                         }
                         KeyCode::Esc => {
                             app.is_filtering = false;
                             app.filter.clear();
-                            let _ = app.refresh_data(vt_client);
+                            app.apply_filter_and_sort();
                         }
                         KeyCode::Backspace => {
                             app.filter.pop();
-                            let _ = app.refresh_data(vt_client);
+                            app.apply_filter_and_sort();
                         }
                         KeyCode::Char(c) => {
                             app.filter.push(c);
-                            let _ = app.refresh_data(vt_client);
+                            app.apply_filter_and_sort();
                         }
                         _ => {}
                     }
@@ -175,19 +201,37 @@ fn main_loop<B: ratatui::backend::Backend>(
                                 return Ok(());
                             } else {
                                 app.filter.clear();
-                                let _ = app.refresh_data(vt_client);
+                                app.apply_filter_and_sort();
                             }
                         }
                         KeyCode::Char('/') => {
                             app.is_filtering = true;
                         }
                         KeyCode::Char('r') => {
-                            let _ = app.refresh_data(vt_client);
+                            let _ = app.fetch_system_processes(vt_client);
                         }
-                        KeyCode::Down | KeyCode::Char('j') => app.next(),
-                        KeyCode::Up | KeyCode::Char('k') => app.previous(),
+                        KeyCode::Char('t') => {
+                            app.show_tree_view = !app.show_tree_view;
+                            app.apply_filter_and_sort();
+                        }
                         KeyCode::Tab => {
-                            app.selected_tab = (app.selected_tab + 1) % 2;
+                            app.active_panel = (app.active_panel + 1) % 2;
+                        }
+                        KeyCode::PageDown | KeyCode::Char('d') => app.scroll_detail_down(5),
+                        KeyCode::PageUp | KeyCode::Char('u') => app.scroll_detail_up(5),
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if app.active_panel == 1 {
+                                app.scroll_detail_down(2);
+                            } else {
+                                app.next();
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if app.active_panel == 1 {
+                                app.scroll_detail_up(2);
+                            } else {
+                                app.previous();
+                            }
                         }
                         _ => {}
                     }
@@ -220,6 +264,8 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
         }
     }
 
+    let mode_label = if app.show_tree_view { "PSTree View" } else { "Risk-Sorted View" };
+
     let header_spans = vec![
         Span::styled(
             " MINTAKA v0.9 ",
@@ -228,7 +274,11 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" Interactive Triage Dashboard  │ Total: "),
+        Span::styled(
+            format!(" Mode: [{}] ", mode_label),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("│ Total: "),
         Span::styled(
             app.processes.len().to_string(),
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -254,7 +304,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(" Live Process & Network Triage "),
+            .title(" Live Process Triage & Parent-Child Execution Tree "),
     );
     f.render_widget(header, chunks[0]);
 
@@ -281,11 +331,17 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
                 .map(|vt| format!("{}/{}", vt.exe_positives, vt.exe_total))
                 .unwrap_or_else(|| "-".to_string());
 
+            let display_name = if app.show_tree_view {
+                format!("{}{}", p.tree_prefix, p.name)
+            } else {
+                p.name.clone()
+            };
+
             let exe = p.exe_path.as_deref().unwrap_or("-");
 
             Row::new(vec![
                 p.pid.to_string(),
-                p.name.clone(),
+                display_name,
                 format!("{:>3}", p.risk_score),
                 risk_text.to_string(),
                 p.network_connections.len().to_string(),
@@ -297,11 +353,23 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
         })
         .collect();
 
+    let title_mode = if app.show_tree_view {
+        format!(" Process Execution Tree ({}) ", app.processes.len())
+    } else {
+        format!(" Processes sorted by Risk ({}) ", app.processes.len())
+    };
+
+    let table_border_style = if app.active_panel == 0 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
     let table = Table::new(
         rows,
         [
             Constraint::Length(7),  // PID
-            Constraint::Length(18), // Name
+            Constraint::Length(22), // Name / Tree
             Constraint::Length(6),  // Score
             Constraint::Length(7),  // Risk Level
             Constraint::Length(6),  // Conns
@@ -312,7 +380,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
     )
     .header(
         Row::new(vec![
-            "PID", "Name", "Score", "Risk", "Conns", "DLLs", "VT", "Path",
+            "PID", "Process Tree / Name", "Score", "Risk", "Conns", "DLLs", "VT", "Path",
         ])
         .style(
             Style::default()
@@ -323,8 +391,8 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(format!(" Processes ({}) ", app.processes.len())),
+            .border_style(table_border_style)
+            .title(title_mode),
     )
     .highlight_style(
         Style::default()
@@ -396,7 +464,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
 
         lines.push(Line::from(""));
 
-        // Indicators
+        // Risk Indicators
         lines.push(Line::from(Span::styled(
             "── Risk Indicators ──",
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -465,7 +533,6 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
         if p.loaded_dlls.is_empty() {
             lines.push(Line::from(Span::raw("  (No extra loaded modules detected)")));
         } else {
-            // Group modules by parent directory
             let mut grouped: std::collections::BTreeMap<String, Vec<&crate::types::LoadedModule>> = std::collections::BTreeMap::new();
             for dll in &p.loaded_dlls {
                 let dir = std::path::Path::new(&dll.path)
@@ -518,13 +585,26 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
         vec![Line::from("Select a process to view details")]
     };
 
+    let inspector_border_style = if app.active_panel == 1 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
+    let inspector_title = if app.detail_scroll > 0 {
+        format!(" Process Inspector (Line {}) [Tab to switch focus] ", app.detail_scroll + 1)
+    } else {
+        " Process Inspector [Tab to switch focus] ".to_string()
+    };
+
     let detail_paragraph = Paragraph::new(detail_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" Process Inspector "),
+                .border_style(inspector_border_style)
+                .title(inspector_title),
         )
+        .scroll((app.detail_scroll, 0))
         .wrap(Wrap { trim: true });
 
     f.render_widget(detail_paragraph, main_chunks[1]);
@@ -537,22 +617,24 @@ fn draw_ui(f: &mut ratatui::Frame, app: &mut TuiApp) {
             Span::styled("  (Press Enter to submit, Esc to cancel)", Style::default().fg(Color::DarkGray)),
         ]
     } else {
+        let focus_label = if app.active_panel == 0 { "Table (Scroll Proc)" } else { "Inspector (Scroll Info)" };
         vec![
             Span::styled(" [q/Esc] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw("Quit  "),
+            Span::styled(" [Tab] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("Focus: {}  ", focus_label), Style::default().fg(Color::Yellow)),
             Span::styled(" [↑/↓/j/k] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("Navigate  "),
+            Span::raw("Scroll  "),
+            Span::styled(" [PgUp/PgDn] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("Scroll Detail  "),
+            Span::styled(" [t] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(if app.show_tree_view { "Flat View  " } else { "Tree View  " }),
             Span::styled(" [/] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(if app.filter.is_empty() { "Filter  " } else { "Change Filter  " }),
             Span::styled(" [c] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("Clear Filter  "),
+            Span::raw("Clear  "),
             Span::styled(" [r] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw("Refresh  "),
-            if !app.filter.is_empty() {
-                Span::styled(format!("│ Active Filter: \"{}\"", app.filter), Style::default().fg(Color::Yellow))
-            } else {
-                Span::raw("")
-            },
         ]
     };
 
